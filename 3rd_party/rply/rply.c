@@ -196,6 +196,7 @@ typedef struct t_ply_ {
     p_ply_element element;
     long nelements;
     char *comment;
+    char used_comments[BUFFERSIZE];
     long ncomments;
     char *obj_info;
     long nobj_infos;
@@ -812,6 +813,13 @@ int ply_get_ply_user_data(p_ply ply, void **pdata, long *idata) {
     if (pdata) *pdata = ply->pdata;
     if (idata) *idata = ply->idata;
     return 1;
+}
+
+int ply_get_comment(p_ply ply, char* comments)
+{
+    assert(ply);
+    if (!ply) return 0;
+    if (ply->used_comments) strcpy(comments, ply->used_comments);
 }
 
 /* ----------------------------------------------------------------------

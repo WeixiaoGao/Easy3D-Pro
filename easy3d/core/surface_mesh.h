@@ -52,6 +52,8 @@ namespace easy3d {
 
     public: //------------------------------------------------------ topology types
 
+        std::vector<std::string> textures;
+
         /**
          * \brief Base class for all topology types (internally it is basically an index).
          * \sa Vertex, Halfedge, Edge, Face

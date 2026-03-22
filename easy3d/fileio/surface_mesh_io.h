@@ -29,7 +29,7 @@
 
 
 #include <string>
-
+#include <vector>
 
 namespace easy3d {
 
@@ -50,7 +50,7 @@ namespace easy3d {
          * \param file_name The file name.
          * \return The pointer of the surface mesh (nullptr if failed).
          */
-		static SurfaceMesh* load(const std::string& file_name);
+        static SurfaceMesh* load(const std::string& file_name, const bool use_face_tex = false);
 
         /**
          * \brief Saves a surface mesh to a file.
@@ -62,6 +62,8 @@ namespace easy3d {
          *      \arg false if failed
          */
 		static bool	save(const std::string& file_name, const SurfaceMesh* mesh);
+
+        static bool save(const std::string& file_name, const SurfaceMesh* mesh, const std::vector<std::string>& comment, bool save_binary = false);
 	};
 
 	namespace io {
@@ -72,10 +74,11 @@ namespace easy3d {
         bool save_sm(const std::string& file_name, const SurfaceMesh* mesh);
 
         /// Reads a surface mesh from a \p PLY format file.
-        bool load_ply(const std::string& file_name, SurfaceMesh* mesh);
+        bool load_ply(const std::string& file_name, SurfaceMesh* mesh, const bool use_face_tex = false);
         /// Saves a surface mesh to a \p PLY format file.
         bool save_ply(const std::string& file_name, const SurfaceMesh* mesh, bool binary = true);
-
+        /// Saves a surface mesh to a \p PLY format file with comments
+        bool save_ply(const std::string& file_name, const SurfaceMesh* mesh, const std::vector<std::string>& comment, bool binary = false);
         /// Reads a surface mesh from a \p OFF format file.
 		bool load_off(const std::string& file_name, SurfaceMesh* mesh);
         /// Saves a surface mesh to a \p OFF format file.

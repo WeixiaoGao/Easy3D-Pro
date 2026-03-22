@@ -59,6 +59,7 @@ typedef void (*p_ply_error_cb)(p_ply ply, const char *message);
  * ---------------------------------------------------------------------- */
 int ply_get_ply_user_data(p_ply ply, void **pdata, long *idata);
 
+int ply_get_comment(p_ply ply, char* comments);
 /* ----------------------------------------------------------------------
  * Opens a PLY file for reading (fails if file is not a PLY file)
  *

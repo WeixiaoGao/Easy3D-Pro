@@ -84,6 +84,257 @@ namespace easy3d {
             return str;
         }
 
+        bool PlyWriter::write(
+            const std::string& file_name,
+            const std::vector<Element>& elements,
+            const std::vector<std::string>& comment,
+            bool binary /* = false */)
+        {
+            e_ply_storage_mode mode = PLY_DEFAULT;
+            if (binary) {
+                if (is_big_endian())
+                    mode = PLY_BIG_ENDIAN;
+                else
+                    mode = PLY_LITTLE_ENDIAN;
+            }
+            else
+                mode = PLY_ASCII;
+
+            p_ply ply = ply_create(file_name.c_str(), mode, nullptr, 0, nullptr);
+            if (!ply) {
+                LOG(ERROR) << "failed to create ply file \'" << file_name << "\'";
+                return false;
+            }
+
+            if (!comment.empty())
+            {
+                for (auto cmt : comment)
+                {
+                    if (!ply_add_comment(ply, cmt.c_str()))
+                    {
+                        LOG(ERROR) << "failed to add comment";
+                        ply_close(ply);
+                        return false;
+                    }
+                }
+            }
+
+
+            // Liangliang: For most scenarios, the num of vertices in a face is small (i.e., in [0, 255]), and PLY_UCHAR
+            // is enough. In case you want to store faces that have more than 256 vertices, you should choose PLY_UINT.
+            e_ply_type length_type = PLY_UCHAR;
+#ifndef NDEBUG
+            // warn the user if the number of vertices in a face is greater than 255
+            for (const auto& e : elements) {
+                if (e.name == FACE) {
+                    for (const auto& property : e.int_list_properties) {
+                        if (property.name == "vertex_indices") {
+                            for (const auto& p : property) {
+                                if (p.size() > 255) {
+                                    length_type = PLY_UINT;
+                                    LOG(WARNING) << "face has " << p.size()
+                                        << " vertices, thus the length field of the list property 'vertex_indices'"
+                                        " is set to PLY_UINT (this might not be recognized by other software)";
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+#endif
+
+            for (const auto& e : elements) {
+                const std::string& element_name = e.name;
+                const std::size_t num = e.num_instances;
+
+                // add elements
+                if (!ply_add_element(ply, element_name.data(), static_cast<long>(num))) {
+                    LOG(ERROR) << "failed to add element: " << element_name;
+                    ply_close(ply);
+                    return false;
+                }
+
+                //-------------------------------------------
+                // add properties
+
+                // int list properties
+                for (const auto& property : e.int_list_properties) {
+                    const std::string& name = property.name;
+                    if (!ply_add_property(ply, name.data(), PLY_LIST, length_type, PLY_INT)) {
+                        LOG(ERROR) << "failed to add int_list property '" << name << "' for element '" << element_name
+                            << "'";
+                        ply_close(ply);
+                        return false;
+                    }
+                }
+
+                // float list properties
+                for (const auto& property : e.float_list_properties) {
+                    const std::string& name = property.name;
+                    if (!ply_add_property(ply, name.data(), PLY_LIST, length_type, PLY_FLOAT)) {
+                        LOG(ERROR) << "failed to add float_list property '" << name << "' for element '" << element_name
+                            << "'";
+                        ply_close(ply);
+                        return false;
+                    }
+                }
+
+                // vector properties: vec3
+                for (const auto& property : e.vec3_properties) {
+                    const std::string& name = property.name;
+
+                    std::string names[3];
+                    if (name == "color") {
+                        // save colors in unsigned char format (use "r", "g", "b" in case of float values in [0, 1])
+                        names[0] = "red";
+                        names[1] = "green";
+                        names[2] = "blue";
+                        for (const auto& n : names) {
+                            if (!ply_add_property(ply, n.data(), PLY_UCHAR, length_type, PLY_UINT8)) {
+                                LOG(ERROR) << "failed to add float property '" << n << "' for element '"
+                                    << element_name << "'";
+                                ply_close(ply);
+                                return false;
+                            }
+                        }
+                    }
+                    else {
+                        if (name == "point") {
+                            names[0] = "x";
+                            names[1] = "y";
+                            names[2] = "z";
+                        }
+                        else if (name == "normal") {
+                            names[0] = "nx";
+                            names[1] = "ny";
+                            names[2] = "nz";
+                        }
+                        else {
+                            names[0] = name + "_x";
+                            names[1] = name + "_y";
+                            names[2] = name + "_z";
+                        }
+
+                        for (const auto& n : names) {
+                            if (!ply_add_property(ply, n.data(), PLY_FLOAT, length_type, PLY_FLOAT)) {
+                                LOG(ERROR) << "failed to add float property '" << n << "' for element '"
+                                    << element_name << "'";
+                                ply_close(ply);
+                                return false;
+                            }
+                        }
+                    }
+                }
+
+                // vector properties: vec2
+                for (const auto& property : e.vec2_properties) {
+                    const std::string& name = property.name;
+
+                    std::string names[2];
+                    if (name == "texcoord") {
+                        names[0] = "texcoord_x";
+                        names[1] = "texcoord_y";
+                    }
+                    else {
+                        names[0] = name + "_x";
+                        names[1] = name + "_y";
+                    }
+
+                    for (const auto& n : names) {
+                        if (!ply_add_property(ply, n.data(), PLY_FLOAT, length_type, PLY_FLOAT)) {
+                            LOG(ERROR) << "failed to add float property '" << n << "' for element '"
+                                << element_name << "'";
+                            ply_close(ply);
+                            return false;
+                        }
+                    }
+                }
+
+                for (const auto& property : e.float_properties) {
+                    const std::string& name = property.name;
+                    if (!ply_add_property(ply, name.data(), PLY_FLOAT, length_type, PLY_FLOAT)) {
+                        LOG(ERROR) << "failed to add float property '" << name << "' for element '" << element_name
+                            << "'";
+                        ply_close(ply);
+                        return false;
+                    }
+                }
+
+                for (const auto& property : e.int_properties) {
+                    const std::string& name = property.name;
+                    if (!ply_add_property(ply, name.data(), PLY_INT, length_type, PLY_INT)) {
+                        LOG(ERROR) << "failed to add int property '" << name << "' for element '" << element_name
+                            << "'";
+                        ply_close(ply);
+                        return false;
+                    }
+                }
+            }
+
+            // write output header
+            if (!ply_write_header(ply))
+                return false;
+
+            for (const auto& e : elements) {
+                const std::size_t num = e.num_instances;
+
+                for (std::size_t j = 0; j < num; ++j) {
+                    for (const auto& property : e.int_list_properties) {
+                        const std::vector<int>& values = property[j];
+                        ply_write(ply, static_cast<double>(values.size()));
+                        for (const auto& value : values)
+                            ply_write(ply, value);
+                    }
+
+                    for (const auto& property : e.float_list_properties) {
+                        const std::vector<float>& values = property[j];
+                        ply_write(ply, static_cast<double>(values.size()));
+                        for (const auto& value : values)
+                            ply_write(ply, static_cast<double>(value));
+                    }
+
+                    for (const auto& property : e.vec3_properties) {
+                        const vec3& v = property[j];
+                        const std::string& name = property.name;
+                        if (name == "color") {
+                            // save colors in unsigned char format
+                            ply_write(ply, static_cast<unsigned char>(v.x * 255));
+                            ply_write(ply, static_cast<unsigned char>(v.y * 255));
+                            ply_write(ply, static_cast<unsigned char>(v.z * 255));
+                        }
+                        else {
+                            ply_write(ply, static_cast<double>(v.x));
+                            ply_write(ply, static_cast<double>(v.y));
+                            ply_write(ply, static_cast<double>(v.z));
+                        }
+                    }
+
+                    for (const auto& property : e.vec2_properties) {
+                        const vec2& v = property[j];
+                        ply_write(ply, static_cast<double>(v.x));
+                        ply_write(ply, static_cast<double>(v.y));
+                    }
+
+                    for (const auto& property : e.float_properties) {
+                        ply_write(ply, static_cast<double>(property[j]));
+                    }
+
+                    for (const auto& property : e.int_properties) {
+                        ply_write(ply, static_cast<double>(property[j]));
+                    }
+                }
+            }
+
+            // close up, we are done
+            if (!ply_close(ply)) {
+                LOG(ERROR) << "failed to close the ply file: " << file_name;
+                return false;
+            }
+
+            return true;
+        }
 
         bool PlyWriter::write(
                 const std::string &file_name,
@@ -463,6 +714,156 @@ namespace easy3d {
             return (!elements.empty() && elements[0].num_instances > 0);
         }
 
+        bool PlyReader::read(const std::string& file_name, std::vector<Element>& elements, std::vector<std::string>& textures)
+        {
+            p_ply ply = ply_open(file_name.c_str(), nullptr, 0, nullptr);
+            if (!ply) {
+                LOG(ERROR) << "failed to open ply file: " << file_name;
+                return false;
+            }
+
+            if (!ply_read_header(ply)) {
+                LOG(ERROR) << "failed to read ply header";
+                ply_close(ply);
+                return false;
+            }
+            //************************Weixiao Update****************************//
+            //get texture files
+            char* comments = new char[INT_MAX];
+            ply_get_comment(ply, comments);
+            const char* delim = " ";
+            char* tmp = strtok(comments, delim);
+            bool is_texture = false, is_next = false;
+            while (tmp != NULL)
+            {
+                if (strcmp(tmp, "TextureFile") == 0)
+                {
+                    is_texture = true;
+                    is_next = true;
+                }
+
+                if (is_next && strcmp(tmp, "TextureFile") != 0)
+                {
+                    is_next = false;
+                    textures.push_back(tmp);
+                }
+
+                tmp = strtok(NULL, delim);
+            }
+            delete[]comments;
+            //*******************************************************************//
+
+            // setup callbacks
+            auto callback_value_property = [](p_ply_argument argument) -> int {
+                long instance_index = 0; // the index of the current element instance
+                ply_get_argument_element(argument, nullptr, &instance_index);
+
+                ValueProperty* prop_ptr = nullptr;
+                ply_get_argument_user_data(argument, (void**)(&prop_ptr), nullptr);
+
+                auto& prop = *prop_ptr;
+                prop[instance_index] = ply_get_argument_value(argument);
+
+                return 1; // returns 1 if should continue processing file, 0 if should abort.
+                };
+
+            auto callback_list_property = [](p_ply_argument argument) -> int {
+                long instance_index = 0; // the index of the current element instance
+                ply_get_argument_element(argument, nullptr, &instance_index);
+
+                long length = 0, value_index = 0;
+                ply_get_argument_property(argument, nullptr, &length, &value_index);
+                if (value_index < 0 || value_index >= length) {
+                    return 1; // returns 1 if should continue processing file, 0 if should abort.
+                }
+
+                ListProperty* prop_ptr = nullptr;
+                ply_get_argument_user_data(argument, (void**)(&prop_ptr), nullptr);
+
+                auto& prop = *prop_ptr;
+                auto& entry = prop[instance_index];
+                if (entry.empty())
+                    entry.resize(length);
+                entry[value_index] = ply_get_argument_value(argument);
+
+                return 1; // returns 1 if should continue processing file, 0 if should abort.
+                };
+
+            p_ply_element element = nullptr;
+            /* iterate over all elements in input file */
+            while ((element = ply_get_next_element(ply, element))) {
+                long num_instances = 0;
+                const char* element_name = nullptr;
+                ply_get_element_info(element, &element_name, &num_instances);
+                if (num_instances <= 0)
+                    continue;
+
+                //                if (strcmp(element_name, VERTEX) && strcmp(element_name, FACE) && strcmp(element_name, EDGE)) {
+                //                    LOG(ERROR) << "unknown element: " << element_name << " (ignored)";
+                //                    continue;
+                //                }
+
+                p_ply_property property = nullptr;
+                /* iterate over all properties of current element */
+                while ((property = ply_get_next_property(element, property))) {
+                    const char* property_name = nullptr;
+                    e_ply_type type, length_type, value_type;
+                    ply_get_property_info(property, &property_name, &type, &length_type, &value_type);
+
+                    //                    if (strcmp(element_name, VERTEX) && strcmp(element_name, FACE) && strcmp(element_name, EDGE)) {
+                    //                        LOG(ERROR) << "property '" << property_name << "' on unknown element '" << element_name
+                    //                                   << "' (ignored)";
+                    //                        continue;
+                    //                    }
+
+                                        // It is possible to save all properties as PLY_LIST of value type double. This allows me to use
+                                        // the same callback function to handle all the properties. But the performance is low. So I handle
+                                        // list properties and value properties separately.
+                    if (type == PLY_LIST) {
+                        auto prop = new ListProperty(element_name, property_name);
+                        prop->orig_value_type = value_type;
+                        prop->resize(num_instances);
+                        list_properties_.push_back(prop);
+                        if (!ply_set_read_cb(ply, element_name, property_name, callback_list_property, prop, 0)) {
+                            LOG(ERROR) << "failed to set callback for list property '" << property_name
+                                << "' for element '" << element_name << "'";
+                            return false;
+                        }
+                    }
+                    else {
+                        auto prop = new ValueProperty(element_name, property_name);
+                        prop->orig_value_type = type;
+                        prop->resize(num_instances);
+                        value_properties_.push_back(prop);
+                        if (!ply_set_read_cb(ply, element_name, property_name, callback_value_property, prop, 0)) {
+                            LOG(ERROR) << "failed to set callback for property '" << property_name << "' for element '"
+                                << element_name << "'";
+                            return false;
+                        }
+                    }
+
+                }
+            }
+
+            if (!ply_read(ply)) {
+                LOG(ERROR) << "error occurred while parsing ply file";
+                ply_close(ply);
+                return false;
+            }
+
+            ply_close(ply);
+
+            // create the elements
+            collect_elements(elements);
+
+            // cleaning
+            for (auto prop : list_properties_) delete prop;
+            list_properties_.clear();
+            for (auto prop : value_properties_) delete prop;
+            value_properties_.clear();
+
+            return (!elements.empty() && elements[0].num_instances > 0);
+        }
 
         std::size_t PlyReader::num_instances(const std::string &file_name, const std::string &name) {
             p_ply ply = ply_open(file_name.c_str(), nullptr, 0, nullptr);

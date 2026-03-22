@@ -120,6 +120,8 @@ namespace easy3d {
 			 * \return True if the file was successfully read, false otherwise.
 			 */
 			bool read(const std::string& file_name, std::vector<Element>& elements);
+
+			bool read(const std::string& file_name, std::vector<Element>& elements, std::vector<std::string>& textures);
 			/**
 			 * \brief A quick check of the number of instances of a type of element.
 			 * \details The typical use is to determine if a PLY file stores a point cloud, a graph, or a surface mesh.
@@ -177,6 +179,13 @@ namespace easy3d {
 			 * \param binary True for binary format, otherwise ASCII format.
 			 * \return True if the file was successfully written, false otherwise.
 			 */
+			static bool write(
+				const std::string& file_name,
+				const std::vector<Element>& elements,
+				const std::vector<std::string>& comment,
+				bool binary /* = false */
+			);
+
             static bool write(
                     const std::string &file_name,
                     const std::vector<Element> &elements,

@@ -34,7 +34,7 @@
 namespace easy3d {
 
 
-    SurfaceMesh *SurfaceMeshIO::load(const std::string &file_name) {
+    SurfaceMesh *SurfaceMeshIO::load(const std::string &file_name, const bool use_face_tex) {
         auto mesh = new SurfaceMesh;
         mesh->set_name(file_name);
 
@@ -43,7 +43,7 @@ namespace easy3d {
 
         const std::string &ext = file_system::extension(file_name, true);
         if (ext == "ply")
-            success = io::load_ply(file_name, mesh);
+            success = io::load_ply(file_name, mesh, use_face_tex);
         else if (ext == "sm")
             success = io::load_sm(file_name, mesh);
         else if (ext == "obj")
@@ -80,6 +80,40 @@ namespace easy3d {
         return mesh;
     }
 
+    bool SurfaceMeshIO::save(const std::string& file_name, const SurfaceMesh* mesh, const std::vector<std::string>& comment, bool save_binary)
+    {
+        if (!mesh || mesh->n_faces() == 0) {
+            LOG(ERROR) << "surface mesh is null";
+            return false;
+        }
+
+        StopWatch w;
+        bool success = false;
+
+        std::string final_name = file_name;
+        const std::string& ext = file_system::extension(file_name, true);
+
+        if (ext == "ply" || ext.empty()) {
+            if (ext.empty()) {
+                LOG(ERROR) << "no extension specified, default to ply" << ext;
+                final_name = final_name + ".ply";
+            }
+            success = io::save_ply(final_name, mesh, comment, save_binary);
+        }
+        else {
+            LOG(ERROR) << "unknown file format: " << ext;
+            success = false;
+        }
+
+        if (success) {
+            LOG(INFO) << "save model done. " << w.time_string();
+            return true;
+        }
+        else {
+            LOG(INFO) << "save model failed";
+            return false;
+        }
+    }
 
     bool SurfaceMeshIO::save(const std::string &file_name, const SurfaceMesh *mesh) {
         if (!mesh || mesh->n_faces() == 0) {

@@ -103,6 +103,15 @@ namespace easy3d {
                 return {};
             }
 
+//            if (!PolygonPartition::apply_HM(polygon, parts))
+//            {
+//                LOG(WARNING) << "failed to perform convex partition of a complex polygon (the polygon ignored)";
+//#ifndef NDEBUG
+//                LOG(WARNING) << "outer loop: " << outer_poly;
+//#endif
+//                return {};
+//            }
+
             std::vector<SurfaceMeshPolygonization::Contour> result;
             for (auto &poly: parts) {
                 std::vector<SurfaceMesh::Vertex> vts;
