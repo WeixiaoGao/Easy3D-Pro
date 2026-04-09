@@ -423,15 +423,15 @@ std::vector<QString> WidgetLinesDrawable::colorSchemes(const easy3d::Model *mode
     std::vector<QString> schemes;
     schemes.emplace_back("uniform color");
 
-    auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+    auto mesh = dynamic_cast<const SurfaceMesh *>(model);
     if (mesh)
         internal::color_schemes_for_scalar_fields(mesh, scalar_prefix_, schemes);
 
-    auto graph = dynamic_cast<Graph *>(viewer_->currentModel());
+    auto graph = dynamic_cast<const Graph *>(model);
     if (graph)
         internal::color_schemes_for_scalar_fields(graph, scalar_prefix_, schemes);
 
-    auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
+    auto poly = dynamic_cast<const PolyMesh *>(model);
     if (poly)
         internal::color_schemes_for_scalar_fields(poly, scalar_prefix_, schemes);
 
@@ -442,21 +442,13 @@ std::vector<QString> WidgetLinesDrawable::colorSchemes(const easy3d::Model *mode
 std::vector<QString> WidgetLinesDrawable::vectorFields(const easy3d::Model *model) {
     std::vector<QString> fields;
 
-    auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+    auto mesh = dynamic_cast<const SurfaceMesh *>(model);
     if (mesh)
         internal::vector_fields_on_edges(mesh, fields);
-
-    else {
-        auto graph = dynamic_cast<Graph *>(viewer_->currentModel());
-        if (graph)
-            internal::vector_fields_on_edges(graph, fields);
-
-        else {
-            auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
-            if (poly)
-                internal::vector_fields_on_edges(poly, fields);
-        }
-    }
+    else if (auto graph = dynamic_cast<const Graph *>(model))
+        internal::vector_fields_on_edges(graph, fields);
+    else if (auto poly = dynamic_cast<const PolyMesh *>(model))
+        internal::vector_fields_on_edges(poly, fields);
 
     // if no vector fields found, add a "not available" item
     if (fields.empty())

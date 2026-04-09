@@ -83,6 +83,26 @@ namespace easy3d {
 				}
 			}
 
+
+			template <typename T, typename PropertyT>
+            inline void add_edge_properties(Graph* graph, const std::vector<Graph::Edge>& edge_map, const std::vector<PropertyT>& properties)
+			{
+				for (const auto& p : properties) {
+                    std::string name = p.name;
+                    if (p.size() != edge_map.size()) {
+                        LOG(ERROR) << "edge property size (" << p.size() << ") does not match number of input edges (" << edge_map.size() << ")";
+						continue;
+					}
+					if (name.find("e:") == std::string::npos)
+						name = "e:" + name;
+                    auto prop = graph->edge_property<T>(name);
+                    for (std::size_t i = 0; i < edge_map.size(); ++i) {
+                        if (edge_map[i].is_valid())
+                            prop[edge_map[i]] = p[i];
+                    }
+				}
+			}
+
 		} // namespace internal
 
 
@@ -166,11 +186,14 @@ namespace easy3d {
                           << "), stored as ModelProperty<dvec3>(\"translation\")";
             }
 
+            std::vector<Graph::Edge> edge_map;
+            edge_map.reserve(edge_vertex_indices.size());
             for (const auto& e : edge_vertex_indices) {
                 if (e.size() == 2)
-                    graph->add_edge(Graph::Vertex(e[0]), Graph::Vertex(e[1]));
+                    edge_map.push_back(graph->add_edge(Graph::Vertex(e[0]), Graph::Vertex(e[1])));
                 else {
                     LOG(ERROR) << "The size of edge property \'vertex_indices\' is not 2";
+                    edge_map.emplace_back();
                     continue;
                 }
             }
@@ -188,12 +211,12 @@ namespace easy3d {
                 else if (e.name == "face")
                     LOG(ERROR) << "The Graph has face information (ignored). Is it a mesh?";
                 else if (e.name == "edge") {
-                    internal::add_edge_properties<vec3>(graph, e.vec3_properties);
-                    internal::add_edge_properties<vec2>(graph, e.vec2_properties);
-                    internal::add_edge_properties<float>(graph, e.float_properties);
-                    internal::add_edge_properties<int>(graph, e.int_properties);
-                    internal::add_edge_properties< std::vector<int> >(graph, e.int_list_properties);
-                    internal::add_edge_properties< std::vector<float> >(graph, e.float_list_properties);
+                    internal::add_edge_properties<vec3>(graph, edge_map, e.vec3_properties);
+                    internal::add_edge_properties<vec2>(graph, edge_map, e.vec2_properties);
+                    internal::add_edge_properties<float>(graph, edge_map, e.float_properties);
+                    internal::add_edge_properties<int>(graph, edge_map, e.int_properties);
+                    internal::add_edge_properties< std::vector<int> >(graph, edge_map, e.int_list_properties);
+                    internal::add_edge_properties< std::vector<float> >(graph, edge_map, e.float_list_properties);
 				}
                 else {
                     const std::string name = "element-" + e.name;

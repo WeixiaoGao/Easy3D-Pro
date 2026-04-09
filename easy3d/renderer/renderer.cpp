@@ -115,6 +115,7 @@ namespace easy3d {
             edges->set_color(setting::graph_edges_color);
             edges->set_impostor_type(setting::graph_edges_imposters ? LinesDrawable::CYLINDER : LinesDrawable::PLAIN);
 			edges->set_line_width(setting::graph_edges_size);
+            set_default_rendering_state(dynamic_cast<Graph *>(model_), edges);
 		} else if (dynamic_cast<PolyMesh *>(model_)) {
             // we have two faces drawables for polyhedral meshes
             // border faces
@@ -305,6 +306,46 @@ namespace easy3d {
 
         // 4: uniform color
         drawable->set_uniform_coloring(setting::graph_vertices_color);
+    }
+
+
+    void Renderer::set_default_rendering_state(Graph *model, LinesDrawable *drawable) {
+        assert(model);
+        assert(drawable);
+
+        // Priorities:
+        //     1. per-edge color: in "e:color";
+        //     2. per-edge texture coordinates: in "e:texcoord";
+        //     3. scalar field on edges;
+        //     4. uniform color.
+
+        // 1. per-edge color: in "e:color"
+        auto colors = model->get_edge_property<vec3>("e:color");
+        if (colors) {
+            drawable->set_property_coloring(State::EDGE, "e:color");
+            return;
+        }
+
+        // 2. per-edge texture coordinates: in "e:texcoord"
+        auto texcoord = model->get_edge_property<vec2>("e:texcoord");
+        if (texcoord) {
+            drawable->set_texture_coloring(State::EDGE, "e:texcoord");
+            return;
+        }
+
+        // 3. scalar field on edges
+        const auto properties = model->edge_properties();
+        for (const auto& name : properties) {
+            if (model->get_edge_property<int>(name) || model->get_edge_property<unsigned int>(name) ||
+                model->get_edge_property<float>(name) || model->get_edge_property<double>(name) ||
+                model->get_edge_property<char>(name) || model->get_edge_property<unsigned char>(name)) {
+                drawable->set_scalar_coloring(State::EDGE, name);
+                return;
+            }
+        }
+
+        // 4: uniform color
+        drawable->set_uniform_coloring(setting::graph_edges_color);
     }
 
 

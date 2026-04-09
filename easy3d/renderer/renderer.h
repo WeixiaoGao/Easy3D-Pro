@@ -272,6 +272,18 @@ namespace easy3d {
          */
         void set_default_rendering_state(Graph *model, PointsDrawable *drawable);
 
+        /*
+         * @brief Set the default rendering state of the "edges" drawable of a graph.
+         * @details The default rendering state is determined by the availability of the edge properties.
+         *          The motivation is that the most appealing rendering is demonstrated by default. The following
+         *          priority applies:
+         *              1. per-edge color: in "e:color";
+         *              2. per-edge texture coordinates: in "e:texcoord";
+         *              3. scalar field on edges;
+         *              4. uniform color.
+         */
+        void set_default_rendering_state(Graph *model, LinesDrawable *drawable);
+
     protected:
         Model* model_;
 
