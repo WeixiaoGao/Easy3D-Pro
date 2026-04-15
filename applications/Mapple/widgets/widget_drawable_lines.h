@@ -67,6 +67,7 @@ private:
 
     easy3d::Drawable *drawable() override ;
     void disableUnavailableOptions() override ;
+    bool shouldApplyToAllDrawables() const override;
 
     // model dependent stuff
     std::vector<QString> colorSchemes(const easy3d::Model *model);

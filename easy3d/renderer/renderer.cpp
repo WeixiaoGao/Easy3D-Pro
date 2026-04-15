@@ -24,6 +24,11 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  ********************************************************************/
 
+#include <algorithm>
+#include <limits>
+#include <typeinfo>
+#include <unordered_set>
+
 #include <easy3d/renderer/renderer.h>
 #include <easy3d/core/graph.h>
 #include <easy3d/core/point_cloud.h>
@@ -32,11 +37,599 @@
 #include <easy3d/renderer/drawable_points.h>
 #include <easy3d/renderer/drawable_lines.h>
 #include <easy3d/renderer/drawable_triangles.h>
+#include <easy3d/renderer/texture_manager.h>
+#include <easy3d/util/file_system.h>
 #include <easy3d/util/logging.h>
 #include <easy3d/util/setting.h>
 
 
 namespace easy3d {
+
+    namespace {
+        template <typename T>
+        bool collect_face_texture_indices(const SurfaceMesh *model,
+                                          const std::string& property_name,
+                                          std::vector<int>& indices) {
+            auto prop = model->get_face_property<T>(property_name);
+            if (!prop)
+                return false;
+
+            indices.clear();
+            indices.reserve(model->n_faces());
+            for (auto face : model->faces())
+                indices.push_back(static_cast<int>(prop[face]));
+            return true;
+        }
+
+        template <typename FT>
+        void clamp_scalar_field(const std::vector<FT> &property,
+                                float &min_value,
+                                float &max_value,
+                                float dummy_lower_percent,
+                                float dummy_upper_percent) {
+            if (property.empty()) {
+                LOG(WARNING) << "empty property";
+                return;
+            }
+
+            std::vector<FT> values = property;
+            std::sort(values.begin(), values.end());
+
+            const std::size_t n = values.size() - 1;
+            const std::size_t index_lower = static_cast<std::size_t>(n * dummy_lower_percent);
+            const std::size_t index_upper = n - static_cast<std::size_t>(n * dummy_upper_percent);
+
+            min_value = static_cast<float>(values[index_lower]);
+            max_value = static_cast<float>(values[index_upper]);
+            if (min_value >= max_value) {
+                min_value = static_cast<float>(values.front());
+                max_value = static_cast<float>(values.back());
+            }
+
+            if (min_value >= max_value && typeid(FT) == typeid(bool)) {
+                min_value = 0.0f;
+                max_value = 1.0f;
+            }
+        }
+
+        template <typename FT>
+        float scalar_coord(FT value, float min_value, float max_value) {
+            const auto range = max_value - min_value;
+            if (range <= std::numeric_limits<float>::epsilon())
+                return 0.5f;
+
+            return (static_cast<float>(value) - min_value) / range;
+        }
+
+        Texture* request_mesh_texture(const SurfaceMesh *model, const std::string& texture_name = "") {
+            std::vector<std::string> candidates;
+            if (!texture_name.empty())
+                candidates.push_back(texture_name);
+            else if (model)
+                candidates = model->textures;
+
+            for (const auto& candidate : candidates) {
+                std::string resolved = file_system::convert_to_native_style(candidate);
+                if (!file_system::is_file(resolved) && model)
+                    resolved = file_system::convert_to_native_style(file_system::parent_directory(model->name()) + "/" + candidate);
+
+                if (!file_system::is_file(resolved))
+                    continue;
+
+                if (auto tex = TextureManager::request(resolved, Texture::REPEAT))
+                    return tex;
+            }
+
+            return nullptr;
+        }
+
+        bool prepare_subset_geometry(SurfaceMesh *mesh,
+                                     const TrianglesDrawable *drawable,
+                                     SurfaceMesh::VertexProperty<vec3>& points,
+                                     SurfaceMesh::VertexProperty<vec3>& normals) {
+            points = mesh->get_vertex_property<vec3>("v:point");
+            if (!points) {
+                LOG(WARNING) << "missing geometry for drawable '" << drawable->name() << "'";
+                return false;
+            }
+
+            mesh->update_vertex_normals();
+            normals = mesh->get_vertex_property<vec3>("v:normal");
+            if (!normals) {
+                LOG(WARNING) << "missing vertex normals for drawable '" << drawable->name() << "'";
+                return false;
+            }
+
+            return true;
+        }
+
+        void update_triangle_range(SurfaceMesh *mesh, const std::vector<int>& face_indices) {
+            auto triangle_range = mesh->face_property<std::pair<int, int> >("f:triangle_range");
+            int triangle_index = 0;
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                triangle_range[face] = std::make_pair(triangle_index, triangle_index);
+                ++triangle_index;
+            }
+        }
+
+        void update_subset_uniform_colors(SurfaceMesh *mesh,
+                                          TrianglesDrawable *drawable,
+                                          const std::vector<int>& face_indices) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            std::vector<vec3> d_points, d_normals;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        void update_subset_colors_on_faces(SurfaceMesh *mesh,
+                                           TrianglesDrawable *drawable,
+                                           const std::vector<int>& face_indices,
+                                           SurfaceMesh::FaceProperty<vec3> colors) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            std::vector<vec3> d_points, d_normals, d_colors;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_colors.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                const auto& color = colors[face];
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_colors.push_back(color);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_color_buffer(d_colors);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        void update_subset_colors_on_vertices(SurfaceMesh *mesh,
+                                              TrianglesDrawable *drawable,
+                                              const std::vector<int>& face_indices,
+                                              SurfaceMesh::VertexProperty<vec3> colors) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            std::vector<vec3> d_points, d_normals, d_colors;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_colors.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_colors.push_back(colors[v]);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_color_buffer(d_colors);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        void update_subset_texcoords_on_vertices(SurfaceMesh *mesh,
+                                                 TrianglesDrawable *drawable,
+                                                 const std::vector<int>& face_indices,
+                                                 SurfaceMesh::VertexProperty<vec2> texcoords) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            std::vector<vec3> d_points, d_normals;
+            std::vector<vec2> d_texcoords;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_texcoords.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_texcoords.push_back(texcoords[v]);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_texcoord_buffer(d_texcoords);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        void update_subset_texcoords_on_halfedges(SurfaceMesh *mesh,
+                                                  TrianglesDrawable *drawable,
+                                                  const std::vector<int>& face_indices,
+                                                  SurfaceMesh::HalfedgeProperty<vec2> texcoords) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            std::vector<vec3> d_points, d_normals;
+            std::vector<vec2> d_texcoords;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_texcoords.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_texcoords.push_back(texcoords[h]);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_texcoord_buffer(d_texcoords);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        template <typename FT>
+        void update_subset_scalar_on_faces(SurfaceMesh *mesh,
+                                           TrianglesDrawable *drawable,
+                                           const std::vector<int>& face_indices,
+                                           SurfaceMesh::FaceProperty<FT> prop) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            const float dummy_lower = drawable->clamp_range() ? drawable->clamp_lower() : 0.0f;
+            const float dummy_upper = drawable->clamp_range() ? drawable->clamp_upper() : 0.0f;
+            float min_value = std::numeric_limits<float>::max();
+            float max_value = -std::numeric_limits<float>::max();
+            clamp_scalar_field(prop.vector(), min_value, max_value, dummy_lower, dummy_upper);
+
+            std::vector<vec3> d_points, d_normals;
+            std::vector<vec2> d_texcoords;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_texcoords.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                const float coord = scalar_coord(prop[face], min_value, max_value);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_texcoords.emplace_back(coord, 0.5f);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_texcoord_buffer(d_texcoords);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        template <typename FT>
+        void update_subset_scalar_on_vertices(SurfaceMesh *mesh,
+                                              TrianglesDrawable *drawable,
+                                              const std::vector<int>& face_indices,
+                                              SurfaceMesh::VertexProperty<FT> prop) {
+            SurfaceMesh::VertexProperty<vec3> points;
+            SurfaceMesh::VertexProperty<vec3> normals;
+            if (!prepare_subset_geometry(mesh, drawable, points, normals))
+                return;
+
+            const float dummy_lower = drawable->clamp_range() ? drawable->clamp_lower() : 0.0f;
+            const float dummy_upper = drawable->clamp_range() ? drawable->clamp_upper() : 0.0f;
+            float min_value = std::numeric_limits<float>::max();
+            float max_value = -std::numeric_limits<float>::max();
+            clamp_scalar_field(prop.vector(), min_value, max_value, dummy_lower, dummy_upper);
+
+            std::vector<vec3> d_points, d_normals;
+            std::vector<vec2> d_texcoords;
+            d_points.reserve(face_indices.size() * 3);
+            d_normals.reserve(face_indices.size() * 3);
+            d_texcoords.reserve(face_indices.size() * 3);
+            for (const auto face_index : face_indices) {
+                auto face = SurfaceMesh::Face(face_index);
+                for (auto h : mesh->halfedges(face)) {
+                    auto v = mesh->target(h);
+                    d_points.push_back(points[v]);
+                    d_normals.push_back(normals[v]);
+                    d_texcoords.emplace_back(scalar_coord(prop[v], min_value, max_value), 0.5f);
+                }
+            }
+
+            drawable->update_vertex_buffer(d_points);
+            drawable->update_normal_buffer(d_normals);
+            drawable->update_texcoord_buffer(d_texcoords);
+            drawable->disable_element_buffer();
+            update_triangle_range(mesh, face_indices);
+        }
+
+        void update_subset_face_drawable(SurfaceMesh *mesh,
+                                         TrianglesDrawable *drawable,
+                                         const std::vector<int>& face_indices) {
+            if (!mesh || !drawable || mesh->empty())
+                return;
+
+            const auto& name = drawable->property_name();
+            switch (drawable->coloring_method()) {
+                case State::TEXTURED: {
+                    switch (drawable->property_location()) {
+                        case State::VERTEX: {
+                            auto texcoord = mesh->get_vertex_property<vec2>(name);
+                            if (texcoord)
+                                update_subset_texcoords_on_vertices(mesh, drawable, face_indices, texcoord);
+                            else {
+                                LOG(WARNING) << "texcoord property '" << name
+                                             << "' not found on vertices (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::HALFEDGE: {
+                            auto texcoord = mesh->get_halfedge_property<vec2>(name);
+                            if (texcoord)
+                                update_subset_texcoords_on_halfedges(mesh, drawable, face_indices, texcoord);
+                            else {
+                                LOG(WARNING) << "texcoord property '" << name
+                                             << "' not found on halfedges (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::FACE:
+                        case State::EDGE:
+                            LOG(WARNING) << "should not happen" << name;
+                            break;
+                    }
+                    break;
+                }
+
+                case State::COLOR_PROPERTY: {
+                    switch (drawable->property_location()) {
+                        case State::FACE: {
+                            auto colors = mesh->get_face_property<vec3>(name);
+                            if (colors)
+                                update_subset_colors_on_faces(mesh, drawable, face_indices, colors);
+                            else {
+                                LOG(WARNING) << "color property '" << name
+                                             << "' not found on faces (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::VERTEX: {
+                            auto colors = mesh->get_vertex_property<vec3>(name);
+                            if (colors)
+                                update_subset_colors_on_vertices(mesh, drawable, face_indices, colors);
+                            else {
+                                LOG(WARNING) << "color property '" << name
+                                             << "' not found on vertices (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::EDGE:
+                        case State::HALFEDGE:
+                            LOG(WARNING) << "should not happen" << name;
+                            break;
+                    }
+                    break;
+                }
+
+                case State::SCALAR_FIELD: {
+                    switch (drawable->property_location()) {
+                        case State::FACE: {
+                            if (auto prop = mesh->get_face_property<float>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<double>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<int>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<unsigned int>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<char>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<unsigned char>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_face_property<bool>(name))
+                                update_subset_scalar_on_faces(mesh, drawable, face_indices, prop);
+                            else {
+                                LOG(WARNING) << "scalar field '" << name
+                                             << "' not found on faces (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::VERTEX: {
+                            if (auto prop = mesh->get_vertex_property<float>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<double>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<int>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<unsigned int>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<char>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<unsigned char>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else if (auto prop = mesh->get_vertex_property<bool>(name))
+                                update_subset_scalar_on_vertices(mesh, drawable, face_indices, prop);
+                            else {
+                                LOG(WARNING) << "scalar field '" << name
+                                             << "' not found on vertices (use uniform coloring)";
+                                drawable->set_coloring_method(State::UNIFORM_COLOR);
+                                update_subset_uniform_colors(mesh, drawable, face_indices);
+                            }
+                            return;
+                        }
+                        case State::EDGE:
+                        case State::HALFEDGE:
+                            LOG(WARNING) << "should not happen" << name;
+                            break;
+                    }
+                    break;
+                }
+
+                case State::UNIFORM_COLOR:
+                default:
+                    drawable->set_coloring_method(State::UNIFORM_COLOR);
+                    update_subset_uniform_colors(mesh, drawable, face_indices);
+                    return;
+            }
+
+            drawable->set_coloring_method(State::UNIFORM_COLOR);
+            update_subset_uniform_colors(mesh, drawable, face_indices);
+        }
+
+        std::string face_texture_drawable_name(const SurfaceMesh *model,
+                                              std::size_t texture_index,
+                                              std::unordered_set<std::string>& used_names) {
+            std::string texture_name;
+            if (model && texture_index < model->textures.size())
+                texture_name = file_system::simple_name(model->textures[texture_index]);
+
+            if (texture_name.empty())
+                texture_name = "texture_" + std::to_string(texture_index);
+
+            std::string name = "faces: " + texture_name;
+            if (used_names.insert(name).second)
+                return name;
+
+            name += " (" + std::to_string(texture_index) + ")";
+            used_names.insert(name);
+            return name;
+        }
+
+        bool create_textured_face_drawables(Renderer *renderer, SurfaceMesh *model) {
+            if (!renderer || !model || !model->is_triangle_mesh())
+                return false;
+
+            auto texcoords = model->get_halfedge_property<vec2>("h:texcoord");
+            if (!texcoords || model->textures.empty())
+                return false;
+
+            std::vector<int> texture_indices;
+            const std::vector<std::string> candidates = {
+                    "f:texnumber", "f:texture_number", "f:texture_id", "f:textureid", "f:texid"
+            };
+            bool has_texture_index = false;
+            for (const auto& property_name : candidates) {
+                if (collect_face_texture_indices<int>(model, property_name, texture_indices) ||
+                    collect_face_texture_indices<unsigned int>(model, property_name, texture_indices) ||
+                    collect_face_texture_indices<char>(model, property_name, texture_indices) ||
+                    collect_face_texture_indices<unsigned char>(model, property_name, texture_indices)) {
+                    has_texture_index = true;
+                    break;
+                }
+            }
+
+            if (!has_texture_index) {
+                if (model->textures.size() > 1) {
+                    LOG(WARNING) << "multiple texture images found on surface mesh '" << model->name()
+                                 << "' but no supported face texture index property (e.g. 'texnumber') exists";
+                }
+                return false;
+            }
+
+            bool zero_based = true;
+            bool one_based = true;
+            for (const auto idx : texture_indices) {
+                zero_based = zero_based && idx >= 0 && idx < static_cast<int>(model->textures.size());
+                one_based = one_based && idx >= 1 && idx <= static_cast<int>(model->textures.size());
+            }
+
+            int index_offset = 0;
+            if (!zero_based && one_based)
+                index_offset = 1;
+            else if (!zero_based && !one_based) {
+                LOG(WARNING) << "invalid face texture indices on surface mesh '" << model->name() << "'";
+                return false;
+            }
+
+            std::vector<std::vector<int> > groups(model->textures.size());
+            std::size_t face_pos = 0;
+            for (auto face : model->faces()) {
+                const int texture_index = texture_indices[face_pos++] - index_offset;
+                if (texture_index >= 0 && texture_index < static_cast<int>(groups.size()))
+                    groups[texture_index].push_back(face.idx());
+            }
+
+            std::unordered_set<std::string> used_drawable_names;
+            std::size_t drawable_count = 0;
+            for (std::size_t texture_index = 0; texture_index < groups.size(); ++texture_index) {
+                const auto& faces = groups[texture_index];
+                if (faces.empty())
+                    continue;
+
+                const std::string drawable_name = face_texture_drawable_name(model, texture_index, used_drawable_names);
+                auto drawable = renderer->add_triangles_drawable(drawable_name);
+                drawable->set_smooth_shading(setting::surface_mesh_faces_phong_shading);
+                drawable->set_visible(setting::surface_mesh_faces_visible);
+                drawable->set_color(setting::surface_mesh_faces_color);
+                drawable->set_opacity(setting::surface_mesh_faces_opacity);
+
+                auto face_indices = std::make_shared<std::vector<int> >(faces);
+                drawable->set_update_func([face_indices](Model *m, Drawable *d) {
+                    auto mesh = dynamic_cast<SurfaceMesh *>(m);
+                    auto drawable = dynamic_cast<TrianglesDrawable *>(d);
+                    if (!mesh || !drawable)
+                        return;
+
+                    update_subset_face_drawable(mesh, drawable, *face_indices);
+                });
+
+                if (auto tex = request_mesh_texture(model, model->textures[texture_index]))
+                    drawable->set_texture_coloring(State::HALFEDGE, "h:texcoord", tex);
+                else
+                    drawable->set_uniform_coloring(setting::surface_mesh_faces_color);
+
+                ++drawable_count;
+            }
+
+            return drawable_count > 0;
+        }
+    }
 
     Renderer::Renderer(Model* model, bool create)
             : visible_(true)
@@ -64,13 +657,15 @@ namespace easy3d {
             vertices->set_point_size(setting::point_cloud_vertices_size);
             set_default_rendering_state(dynamic_cast<PointCloud *>(model_), vertices);
         } else if (dynamic_cast<SurfaceMesh *>(model_)) {
-            // faces
-            auto faces = add_triangles_drawable("faces");
-            faces->set_smooth_shading(setting::surface_mesh_faces_phong_shading);
-            faces->set_visible(setting::surface_mesh_faces_visible);
-            faces->set_color(setting::surface_mesh_faces_color);
-            faces->set_opacity(setting::surface_mesh_faces_opacity);
-            set_default_rendering_state(dynamic_cast<SurfaceMesh *>(model_), faces);
+            auto mesh = dynamic_cast<SurfaceMesh *>(model_);
+            if (!create_textured_face_drawables(this, mesh)) {
+                auto faces = add_triangles_drawable("faces");
+                faces->set_smooth_shading(setting::surface_mesh_faces_phong_shading);
+                faces->set_visible(setting::surface_mesh_faces_visible);
+                faces->set_color(setting::surface_mesh_faces_color);
+                faces->set_opacity(setting::surface_mesh_faces_opacity);
+                set_default_rendering_state(mesh, faces);
+            }
 
 			// vertices
 			auto vertices = add_points_drawable("vertices");
@@ -227,14 +822,14 @@ namespace easy3d {
         // 3. per-halfedge texture coordinates
         auto halfedge_texcoords = model->get_halfedge_property<vec2>("h:texcoord");
         if (halfedge_texcoords) {
-            drawable->set_texture_coloring(State::HALFEDGE, "h:texcoord");
+            drawable->set_texture_coloring(State::HALFEDGE, "h:texcoord", request_mesh_texture(model));
             return;
         }
 
         // 4. per-vertex texture coordinates
         auto vertex_texcoords = model->get_vertex_property<vec2>("v:texcoord");
         if (vertex_texcoords) {
-            drawable->set_texture_coloring(State::VERTEX, "v:texcoord");
+            drawable->set_texture_coloring(State::VERTEX, "v:texcoord", request_mesh_texture(model));
             return;
         }
 

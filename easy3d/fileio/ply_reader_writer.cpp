@@ -727,31 +727,25 @@ namespace easy3d {
                 ply_close(ply);
                 return false;
             }
-            //************************Weixiao Update****************************//
-            //get texture files
-            char* comments = new char[INT_MAX];
-            ply_get_comment(ply, comments);
-            const char* delim = " ";
-            char* tmp = strtok(comments, delim);
-            bool is_texture = false, is_next = false;
-            while (tmp != NULL)
-            {
-                if (strcmp(tmp, "TextureFile") == 0)
-                {
-                    is_texture = true;
-                    is_next = true;
-                }
+            textures.clear();
+            for (const char *comment = ply_get_next_comment(ply, nullptr);
+                 comment != nullptr;
+                 comment = ply_get_next_comment(ply, comment)) {
+                const std::string line(comment);
+                const std::string key("TextureFile");
+                if (line.compare(0, key.size(), key) != 0)
+                    continue;
 
-                if (is_next && strcmp(tmp, "TextureFile") != 0)
-                {
-                    is_next = false;
-                    textures.push_back(tmp);
-                }
+                const auto begin = line.find_first_not_of(" \t", key.size());
+                if (begin == std::string::npos)
+                    continue;
 
-                tmp = strtok(NULL, delim);
+                const auto end = line.find_last_not_of(" \t\r\n");
+                if (end == std::string::npos || end < begin)
+                    continue;
+
+                textures.push_back(line.substr(begin, end - begin + 1));
             }
-            delete[]comments;
-            //*******************************************************************//
 
             // setup callbacks
             auto callback_value_property = [](p_ply_argument argument) -> int {

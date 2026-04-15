@@ -68,6 +68,7 @@ private:
 
     easy3d::Drawable *drawable() override ;
     void disableUnavailableOptions() override ;
+    bool shouldApplyToAllDrawables() const override;
 
     void updateVectorFieldBuffer(easy3d::Model *model, const std::string &name) override ;
 

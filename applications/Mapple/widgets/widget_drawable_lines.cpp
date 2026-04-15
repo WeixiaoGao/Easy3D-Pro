@@ -175,6 +175,9 @@ void WidgetLinesDrawable::updatePanel() {
     for (auto dd : drawables)
         ui_->comboBoxDrawables->addItem(QString::fromStdString(dd->name()));
     ui_->comboBoxDrawables->setCurrentText(QString::fromStdString(d->name()));
+    ui_->checkBoxApplyToAll->setEnabled(related_drawables(d).size() > 1);
+    if (!ui_->checkBoxApplyToAll->isEnabled())
+        ui_->checkBoxApplyToAll->setChecked(false);
 
     // visible
     ui_->checkBoxVisible->setChecked(d->is_visible());
@@ -303,8 +306,10 @@ void WidgetLinesDrawable::setActiveDrawable(const QString &text) {
 
 void WidgetLinesDrawable::setLineWidth(double w) {
     auto d = dynamic_cast<LinesDrawable*>(drawable());
-    if (d->line_width() != w) {
-        d->set_line_width(w);
+    if (d && d->line_width() != w) {
+        for_each_target_drawable(d, [w](LinesDrawable *target) {
+            target->set_line_width(w);
+        });
         viewer_->update();
     }
 }
@@ -312,16 +317,18 @@ void WidgetLinesDrawable::setLineWidth(double w) {
 
 void WidgetLinesDrawable::setImposterStyle(const QString &style) {
     auto d = dynamic_cast<LinesDrawable*>(drawable());
-    if (style == "plain") {
-        if (d->impostor_type() != LinesDrawable::PLAIN)
-            d->set_impostor_type(LinesDrawable::PLAIN);
-    } else if (style == "cylinder") {
-        if (d->impostor_type() != LinesDrawable::CYLINDER)
-            d->set_impostor_type(LinesDrawable::CYLINDER);
-    } else if (style == "cone") {
-        if (d->impostor_type() != LinesDrawable::CONE)
-            d->set_impostor_type(LinesDrawable::CONE);
-    }
+    for_each_target_drawable(d, [&](LinesDrawable *target) {
+        if (style == "plain") {
+            if (target->impostor_type() != LinesDrawable::PLAIN)
+                target->set_impostor_type(LinesDrawable::PLAIN);
+        } else if (style == "cylinder") {
+            if (target->impostor_type() != LinesDrawable::CYLINDER)
+                target->set_impostor_type(LinesDrawable::CYLINDER);
+        } else if (style == "cone") {
+            if (target->impostor_type() != LinesDrawable::CONE)
+                target->set_impostor_type(LinesDrawable::CONE);
+        }
+    });
 
     viewer_->update();
     disableUnavailableOptions();
@@ -346,7 +353,9 @@ void WidgetLinesDrawable::setDefaultColor() {
     const QColor &color = QColorDialog::getColor(orig, this);
     if (color.isValid()) {
         const vec4 new_color(color.redF(), color.greenF(), color.blueF(), color.alphaF());
-        drawable()->set_uniform_coloring(new_color);
+        for_each_target_drawable(dynamic_cast<LinesDrawable *>(drawable()), [&](LinesDrawable *target) {
+            target->set_uniform_coloring(new_color);
+        });
         viewer_->update();
 
         QPixmap pixmap(ui_->toolButtonDefaultColor->size());
@@ -466,13 +475,17 @@ void WidgetLinesDrawable::setVectorField(const QString &text) {
     if (!mesh)
         return;
 
+    auto current = dynamic_cast<LinesDrawable *>(drawable());
+
     if (text == "disabled") {
         const auto &drawables = mesh->renderer()->lines_drawables();
         for (auto d : drawables) {
             if (d->name().find("vector - ") != std::string::npos)
                 d->set_visible(false);
         }
-        states_[drawable()].vector_field = "disabled";
+        for_each_target_drawable(current, [&](LinesDrawable *target) {
+            states_[target].vector_field = "disabled";
+        });
     } else {
         const std::string &name = text.toStdString();
         updateVectorFieldBuffer(mesh, name);
@@ -480,7 +493,9 @@ void WidgetLinesDrawable::setVectorField(const QString &text) {
         auto d = mesh->renderer()->get_lines_drawable("vector - " + name);
         if (d) {
             d->set_visible(true);
-            states_[drawable()].vector_field = text;
+            for_each_target_drawable(current, [&](LinesDrawable *target) {
+                states_[target].vector_field = text;
+            });
         }
     }
 
@@ -558,4 +573,9 @@ void WidgetLinesDrawable::disableUnavailableOptions() {
 
     update();
     qApp->processEvents();
+}
+
+
+bool WidgetLinesDrawable::shouldApplyToAllDrawables() const {
+    return ui_->checkBoxApplyToAll->isChecked();
 }

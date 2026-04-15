@@ -27,6 +27,7 @@
 
 #include "widget_drawable_triangles.h"
 
+#include <algorithm>
 #include <QColorDialog>
 #include <QFileDialog>
 
@@ -172,6 +173,19 @@ WidgetTrianglesDrawable::~WidgetTrianglesDrawable() {
 }
 
 
+namespace internal {
+    std::string scheme_property_name(const std::string& scheme_name, const std::string& scalar_prefix);
+    std::string scheme_texture_name(const std::string& scheme_name);
+    std::string drawable_texture_name(const easy3d::Drawable *drawable, const SurfaceMesh *mesh);
+    std::string resolve_texture_file(const easy3d::Model *model, const std::string& texture_name);
+    bool is_default_checkerboard_texture(const Texture *texture);
+    Texture* request_texture(PaintCanvas *viewer,
+                             const SurfaceMesh *mesh,
+                             const easy3d::Model *model,
+                             const std::string& texture_name);
+}
+
+
 // update the panel to be consistent with the drawable's rendering parameters
 void WidgetTrianglesDrawable::updatePanel() {
     auto model = viewer_->currentModel();
@@ -196,6 +210,9 @@ void WidgetTrianglesDrawable::updatePanel() {
     for (auto drawable : drawables)
         ui_->comboBoxDrawables->addItem(QString::fromStdString(drawable->name()));
     ui_->comboBoxDrawables->setCurrentText(QString::fromStdString(d->name()));
+    ui_->checkBoxApplyToAll->setEnabled(related_drawables(d).size() > 1);
+    if (!ui_->checkBoxApplyToAll->isEnabled())
+        ui_->checkBoxApplyToAll->setChecked(false);
 
     // visible
     ui_->checkBoxVisible->setChecked(d->is_visible());
@@ -216,14 +233,33 @@ void WidgetTrianglesDrawable::updatePanel() {
 
     {   // color scheme
         ui_->comboBoxColorScheme->clear();
-        const std::vector<QString> &schemes = colorSchemes(viewer_->currentModel());
+        const std::vector<QString> &schemes = colorSchemes(model);
         for (const auto &name : schemes)
             ui_->comboBoxColorScheme->addItem(name);
 
+        auto tex = d->texture();
+        QString current_scheme_name;
         for (const auto& name : schemes) {
-            if (name.contains(QString::fromStdString(scheme.property_name()))) {
-                ui_->comboBoxColorScheme->setCurrentText(name);
-                break;
+            if (internal::scheme_property_name(name.toStdString(), scalar_prefix_.toStdString()) != scheme.property_name())
+                continue;
+
+            current_scheme_name = name;
+            break;
+        }
+        if (!current_scheme_name.isEmpty())
+            ui_->comboBoxColorScheme->setCurrentText(current_scheme_name);
+
+        if (scheme.coloring_method() == State::TEXTURED && (!tex || internal::is_default_checkerboard_texture(tex))) {
+            if (auto mesh = dynamic_cast<const SurfaceMesh *>(model)) {
+                auto texture_name = internal::scheme_texture_name(ui_->comboBoxColorScheme->currentText().toStdString());
+                if (texture_name.empty())
+                    texture_name = internal::drawable_texture_name(d, mesh);
+                tex = internal::request_texture(viewer_, mesh, model,
+                                                texture_name);
+                if (tex) {
+                    d->set_texture(tex);
+                    viewer_->update();
+                }
             }
         }
 
@@ -242,13 +278,15 @@ void WidgetTrianglesDrawable::updatePanel() {
         ui_->toolButtonBackColor->setIcon(QIcon(pixmap));
 
         // texture
-        auto tex = d->texture();
+        tex = d->texture();
         if (tex) {
-            const std::string &tex_name = file_system::simple_name(tex->name());
+            const auto tex_name = file_system::convert_to_native_style(tex->name());
             ui_->lineEditTextureFile->setText(QString::fromStdString(tex_name));
-        }
-        else
+            ui_->lineEditTextureFile->setToolTip(QString::fromStdString(tex_name));
+        } else {
             ui_->lineEditTextureFile->setText("not available");
+            ui_->lineEditTextureFile->setToolTip("not available");
+        }
 
         ui_->spinBoxTextureRepeat->setValue(d->texture_repeat());
         ui_->spinBoxTextureFractionalRepeat->setValue(d->texture_fractional_repeat());
@@ -280,7 +318,7 @@ void WidgetTrianglesDrawable::updatePanel() {
 
     {   // vector field
         ui_->comboBoxVectorField->clear();
-        const std::vector<QString> &fields = vectorFields(viewer_->currentModel());
+        const std::vector<QString> &fields = vectorFields(model);
         for (const auto& name : fields)
             ui_->comboBoxVectorField->addItem(name);
 
@@ -298,16 +336,117 @@ void WidgetTrianglesDrawable::updatePanel() {
 
 namespace internal {
 
+    const char *texture_scheme_separator() {
+        return " | texture: ";
+    }
+
+    std::string scheme_property_name(const std::string& scheme_name, const std::string& scalar_prefix) {
+        std::string property = scheme_name;
+        const std::string separator(texture_scheme_separator());
+        const auto pos = property.find(separator);
+        if (pos != std::string::npos)
+            property.erase(pos);
+
+        if (property.find(scalar_prefix) == 0)
+            property.erase(0, scalar_prefix.size());
+
+        return property;
+    }
+
+    std::string scheme_texture_name(const std::string& scheme_name) {
+        const std::string separator(texture_scheme_separator());
+        const auto pos = scheme_name.find(separator);
+        if (pos == std::string::npos)
+            return "";
+
+        return scheme_name.substr(pos + separator.size());
+    }
+
+    std::string drawable_texture_name(const easy3d::Drawable *drawable, const SurfaceMesh *mesh) {
+        if (!drawable || !mesh)
+            return "";
+
+        for (const auto& texture_name : mesh->textures) {
+            const auto simple_name = file_system::simple_name(texture_name);
+            if (!simple_name.empty() && drawable->name().find(simple_name) != std::string::npos)
+                return texture_name;
+        }
+
+        return "";
+    }
+
+    void append_texture_schemes(const std::string& property_name,
+                                const std::vector<std::string>* textures,
+                                std::vector<QString>& schemes) {
+        Q_UNUSED(textures);
+
+        const auto scheme = QString::fromStdString(property_name);
+        if (std::find(schemes.begin(), schemes.end(), scheme) == schemes.end())
+            schemes.push_back(scheme);
+    }
+
+    std::string resolve_texture_file(const easy3d::Model *model, const std::string& texture_name) {
+        if (texture_name.empty())
+            return "";
+
+        const auto native_texture = file_system::convert_to_native_style(texture_name);
+        if (file_system::is_file(native_texture))
+            return native_texture;
+
+        if (!model)
+            return native_texture;
+
+        return file_system::convert_to_native_style(file_system::parent_directory(model->name()) + "/" + texture_name);
+    }
+
+    bool is_default_checkerboard_texture(const Texture *texture) {
+        return texture && file_system::simple_name(texture->name()) == "checkerboard.png";
+    }
+
+    Texture* request_texture(PaintCanvas *viewer,
+                             const SurfaceMesh *mesh,
+                             const easy3d::Model *model,
+                             const std::string& texture_name = "") {
+        std::vector<std::string> candidates;
+        if (!texture_name.empty())
+            candidates.push_back(texture_name);
+        else if (mesh)
+            candidates = mesh->textures;
+
+        for (const auto& candidate : candidates) {
+            const auto resolved = resolve_texture_file(model, candidate);
+            if (!file_system::is_file(resolved)) {
+                LOG_N_TIMES(3, WARNING) << "texture file does not exist: " << resolved << ". " << COUNTER;
+                continue;
+            }
+
+            viewer->makeCurrent();
+            auto tex = TextureManager::request(resolved, Texture::REPEAT);
+            viewer->doneCurrent();
+            if (tex)
+                return tex;
+
+            LOG_N_TIMES(3, WARNING) << "failed creating texture from file: " << resolved << ". " << COUNTER;
+        }
+
+        return nullptr;
+    }
+
     template <typename MODEL>
-    void collect_color_schemes(MODEL* model, const QString& scalar_prefix, std::vector<QString>& schemes) {
+    void collect_color_schemes(const MODEL* model,
+                               const QString& scalar_prefix,
+                               std::vector<QString>& schemes,
+                               const std::vector<std::string>* textures = nullptr) {
         // color schemes from color properties and texture
         for (const auto &name : model->face_properties()) {
             if (name.find("f:color") != std::string::npos)
                 schemes.push_back(QString::fromStdString(name));
         }
         for (const auto &name : model->vertex_properties()) {
-            if (name.find("v:color") != std::string::npos || name.find("v:texcoord") != std::string::npos)
+            if (name.find("v:color") != std::string::npos)
                 schemes.push_back(QString::fromStdString(name));
+            else if (name.find("v:texcoord") != std::string::npos)
+                append_texture_schemes(name, textures, schemes);
         }
 
         // scalar fields defined on faces
@@ -347,7 +486,7 @@ namespace internal {
 
     // vector fields defined on faces
     template <typename MODEL>
-    void vector_fields_on_faces(MODEL* model, std::vector<QString>& fields) {
+    void vector_fields_on_faces(const MODEL* model, std::vector<QString>& fields) {
         fields.emplace_back("f:normal");
         for (const auto &name : model->face_properties()) {
             if (model->template get_face_property<vec3>(name)) {
@@ -365,17 +504,17 @@ std::vector<QString> WidgetTrianglesDrawable::colorSchemes(const easy3d::Model *
     std::vector<QString> schemes;
     schemes.emplace_back("uniform color");
 
-    auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+    auto mesh = dynamic_cast<const SurfaceMesh *>(model);
     if (mesh) {
         for (const auto &name : mesh->halfedge_properties()) {
             if (name.find("h:texcoord") != std::string::npos)
-                schemes.push_back(QString::fromStdString(name));
+                internal::append_texture_schemes(name, &mesh->textures, schemes);
         }
 
-        internal::collect_color_schemes(mesh, scalar_prefix_, schemes);
+        internal::collect_color_schemes(mesh, scalar_prefix_, schemes, &mesh->textures);
     }
 
-    auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
+    auto poly = dynamic_cast<const PolyMesh *>(model);
     if (poly)
         internal::collect_color_schemes(poly, scalar_prefix_, schemes);
 
@@ -386,11 +525,11 @@ std::vector<QString> WidgetTrianglesDrawable::colorSchemes(const easy3d::Model *
 std::vector<QString> WidgetTrianglesDrawable::vectorFields(const easy3d::Model *model) {
     std::vector<QString> fields;
 
-    auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+    auto mesh = dynamic_cast<const SurfaceMesh *>(model);
     if (mesh)
         internal::vector_fields_on_faces(mesh, fields);
     else {
-        auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
+        auto poly = dynamic_cast<const PolyMesh *>(model);
         if (poly)
             internal::vector_fields_on_faces(poly, fields);
     }
@@ -451,34 +590,92 @@ void WidgetTrianglesDrawable::setActiveDrawable(const QString &text) {
 
 void WidgetTrianglesDrawable::setPhongShading(bool b) {
     auto d = dynamic_cast<TrianglesDrawable*>(drawable());
-    if (d->smooth_shading() != b) {
-        d->set_smooth_shading(b);
+    if (d && d->smooth_shading() != b) {
+        for_each_target_drawable(d, [b](TrianglesDrawable *target) {
+            target->set_smooth_shading(b);
+        });
         viewer_->update();
     }
 }
 
 
 void WidgetTrianglesDrawable::setColorScheme(const QString &text) {
-    auto d = drawable();
+    auto d = dynamic_cast<TrianglesDrawable *>(drawable());
+    if (!d)
+        return;
 
     auto tex = d->texture();
     if (tex) {
-        const std::string &tex_name = file_system::simple_name(tex->name());
+        const auto tex_name = file_system::convert_to_native_style(tex->name());
         ui_->lineEditTextureFile->setText(QString::fromStdString(tex_name));
+        ui_->lineEditTextureFile->setToolTip(QString::fromStdString(tex_name));
     }
 
-    auto& scheme = d->state();
-    scheme.set_clamp_range(ui_->checkBoxScalarFieldClamp->isChecked());
-    scheme.set_clamp_lower(ui_->doubleSpinBoxScalarFieldClampLower->value() / 100.0f);
-    scheme.set_clamp_upper(ui_->doubleSpinBoxScalarFieldClampUpper->value() / 100.0f);
-    states_[d].scalar_style = ui_->comboBoxScalarFieldStyle->currentIndex();
+    const auto scheme_name = text.toStdString();
+    const auto method = color_method(scheme_name, scalar_prefix_.toStdString());
+    const auto location = color_location(scheme_name);
+    const auto property_name = internal::scheme_property_name(scheme_name, scalar_prefix_.toStdString());
+    const auto selected_texture_name = internal::scheme_texture_name(scheme_name);
+    const auto clamp_range = ui_->checkBoxScalarFieldClamp->isChecked();
+    const auto clamp_lower = static_cast<float>(ui_->doubleSpinBoxScalarFieldClampLower->value() / 100.0f);
+    const auto clamp_upper = static_cast<float>(ui_->doubleSpinBoxScalarFieldClampUpper->value() / 100.0f);
+    const auto scalar_style = ui_->comboBoxScalarFieldStyle->currentIndex();
+    const auto reference_state = states_[d];
 
-    WidgetDrawable::setColorScheme(text);
+    for_each_target_drawable(d, [&](TrianglesDrawable *target) {
+        states_[target].scalar_style = scalar_style;
+        states_[target].discrete_color = reference_state.discrete_color;
+        states_[target].num_stripes = reference_state.num_stripes;
+
+        auto& scheme = target->state();
+        scheme.set_clamp_range(clamp_range);
+        scheme.set_clamp_lower(clamp_lower);
+        scheme.set_clamp_upper(clamp_upper);
+        scheme.set_coloring(method, location, property_name);
+
+        if (scheme.coloring_method() == State::TEXTURED) {
+            const Texture *texture = nullptr;
+            if (auto mesh = dynamic_cast<const SurfaceMesh *>(target->model())) {
+                if (target->texture() && !internal::is_default_checkerboard_texture(target->texture()))
+                    texture = target->texture();
+
+                if (!texture) {
+                    std::string texture_name = selected_texture_name;
+                    if (texture_name.empty())
+                        texture_name = internal::drawable_texture_name(target, mesh);
+
+                    if (!texture_name.empty())
+                        texture = internal::request_texture(viewer_, mesh, target->model(), texture_name);
+                    else if (!mesh->textures.empty())
+                        texture = internal::request_texture(viewer_, mesh, target->model(), "");
+                }
+            }
+
+            scheme.set_texture(texture);
+        } else if (scheme.coloring_method() == State::SCALAR_FIELD) {
+            scheme.set_texture(colormapTexture(states_[target].scalar_style, states_[target].discrete_color, states_[target].num_stripes));
+            scheme.set_texture_repeat(1.0f);
+            scheme.set_texture_fractional_repeat(0.0f);
+        }
+
+        target->update();
+    });
+
+    viewer_->update();
+    window_->enableCameraManipulation();
+
+    updatePanel();
 }
 
 
 void WidgetTrianglesDrawable::setTextureFile() {
-    const std::string dir = resource::directory() + "/textures/";
+    std::string dir = resource::directory() + "/textures/";
+    if (auto model = viewer_->currentModel()) {
+        const auto model_dir = file_system::convert_to_native_style(file_system::parent_directory(model->name()));
+        if (!model_dir.empty())
+            dir = model_dir;
+    }
+
     QString fileName = QFileDialog::getOpenFileName(this,
                                                     tr("Choose an image file"), QString::fromStdString(dir),
                                                     tr("Image format (*.png *.jpg *.bmp *.tga)")
@@ -493,11 +690,13 @@ void WidgetTrianglesDrawable::setTextureFile() {
     viewer_->doneCurrent();
 
     if (tex) {
-        auto d = drawable();
-        d->set_texture(tex);
+        for_each_target_drawable(dynamic_cast<TrianglesDrawable *>(drawable()), [&](TrianglesDrawable *target) {
+            target->set_texture(tex);
+        });
         viewer_->update();
-        const std::string& simple_name = file_system::simple_name(file_name);
-        ui_->lineEditTextureFile->setText(QString::fromStdString(simple_name));
+        const auto native_name = file_system::convert_to_native_style(file_name);
+        ui_->lineEditTextureFile->setText(QString::fromStdString(native_name));
+        ui_->lineEditTextureFile->setToolTip(QString::fromStdString(native_name));
     } else
         LOG(WARNING) << "failed creating texture from file: " << file_name;
 
@@ -507,7 +706,9 @@ void WidgetTrianglesDrawable::setTextureFile() {
 
 void WidgetTrianglesDrawable::setOpacity(int a) {
     auto d = dynamic_cast<TrianglesDrawable*>(drawable());
-    d->set_opacity(a / 100.0f);
+    for_each_target_drawable(d, [a](TrianglesDrawable *target) {
+        target->set_opacity(a / 100.0f);
+    });
     viewer_->update();
 }
 
@@ -519,7 +720,9 @@ void WidgetTrianglesDrawable::setDefaultColor() {
     const QColor &color = QColorDialog::getColor(orig, this);
     if (color.isValid()) {
         const vec4 new_color(color.redF(), color.greenF(), color.blueF(), color.alphaF());
-        d->set_uniform_coloring(new_color);
+        for_each_target_drawable(dynamic_cast<TrianglesDrawable *>(d), [&](TrianglesDrawable *target) {
+            target->set_uniform_coloring(new_color);
+        });
         viewer_->update();
 
         QPixmap pixmap(ui_->toolButtonDefaultColor->size());
@@ -536,7 +739,9 @@ void WidgetTrianglesDrawable::setBackColor() {
     const QColor &color = QColorDialog::getColor(orig, this);
     if (color.isValid()) {
         const vec4 new_color(color.redF(), color.greenF(), color.blueF(), color.alphaF());
-        d->set_back_color(new_color);
+        for_each_target_drawable(dynamic_cast<TrianglesDrawable *>(d), [&](TrianglesDrawable *target) {
+            target->set_back_color(new_color);
+        });
         viewer_->update();
 
         QPixmap pixmap(ui_->toolButtonBackColor->size());
@@ -548,6 +753,7 @@ void WidgetTrianglesDrawable::setBackColor() {
 
 void WidgetTrianglesDrawable::setVectorField(const QString &text) {
     auto mesh = viewer_->currentModel();
+    auto current = dynamic_cast<TrianglesDrawable *>(drawable());
 
     // hide all
     const auto &drawables = mesh->renderer()->lines_drawables();
@@ -556,16 +762,20 @@ void WidgetTrianglesDrawable::setVectorField(const QString &text) {
             d->set_visible(false);
     }
 
-    if (text == "disabled")
-        states_[drawable()].vector_field = "disabled";
-    else {
+    if (text == "disabled") {
+        for_each_target_drawable(current, [&](TrianglesDrawable *target) {
+            states_[target].vector_field = "disabled";
+        });
+    } else {
         const std::string &name = text.toStdString();
         updateVectorFieldBuffer(mesh, name);
 
         auto d = mesh->renderer()->get_lines_drawable("vector - " + name);
         if (d) { // just in case the vector field has been removed
             d->set_visible(true);
-            states_[drawable()].vector_field = text;
+            for_each_target_drawable(current, [&](TrianglesDrawable *target) {
+                states_[target].vector_field = text;
+            });
         }
     }
 
@@ -664,15 +874,16 @@ void WidgetTrianglesDrawable::setHighlightMin(int v) {
     if (!mesh)
         return;
 
-    auto d = drawable();
-    if (d->name() != "faces")
-        return;
+    auto d = dynamic_cast<TrianglesDrawable *>(drawable());
+    for_each_target_drawable(d, [&](TrianglesDrawable *target) {
+        if (drawable_group_name(target) != "faces")
+            return;
 
-    // face range
-    auto& face_range = states_[d].highlight_range;
-    face_range.first = v;
-
-    internal::set_highlight_range(mesh, d, face_range);
+        auto& face_range = states_[target].highlight_range;
+        face_range.first = v;
+        target->update();
+        internal::set_highlight_range(mesh, target, face_range);
+    });
     viewer_->update();
 }
 
@@ -682,15 +893,16 @@ void WidgetTrianglesDrawable::setHighlightMax(int v) {
     if (!mesh)
         return;
 
-    auto d = drawable();
-    if (d->name() != "faces")
-        return;
+    auto d = dynamic_cast<TrianglesDrawable *>(drawable());
+    for_each_target_drawable(d, [&](TrianglesDrawable *target) {
+        if (drawable_group_name(target) != "faces")
+            return;
 
-    // face range
-    auto& face_range = states_[d].highlight_range;
-    face_range.second = v;
-
-    internal::set_highlight_range(mesh, d, face_range);
+        auto& face_range = states_[target].highlight_range;
+        face_range.second = v;
+        target->update();
+        internal::set_highlight_range(mesh, target, face_range);
+    });
     viewer_->update();
 }
 
@@ -770,4 +982,9 @@ void WidgetTrianglesDrawable::disableUnavailableOptions() {
 
     update();
     qApp->processEvents();
+}
+
+
+bool WidgetTrianglesDrawable::shouldApplyToAllDrawables() const {
+    return ui_->checkBoxApplyToAll->isChecked();
 }

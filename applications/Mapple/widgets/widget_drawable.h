@@ -28,7 +28,9 @@
 #ifndef WIDGET_DRAWABLE_H
 #define WIDGET_DRAWABLE_H
 
+#include <string>
 #include <unordered_map>
+#include <vector>
 #include <QWidget>
 
 #include <easy3d/renderer/drawable.h>
@@ -90,6 +92,8 @@ protected:
 
     virtual void updateVectorFieldBuffer(easy3d::Model *model, const std::string &name) = 0;
 
+    virtual bool shouldApplyToAllDrawables() const = 0;
+
     struct ColorMap {
         ColorMap(const std::string& f, const std::string& n) : file(f), name(n), texture(nullptr) {}
         std::string file;
@@ -120,6 +124,21 @@ protected:
 
     // get the color location from the color scheme name
     easy3d::State::Location color_location(const std::string& name) const;
+
+    std::string drawable_group_name(const easy3d::Drawable *drawable) const;
+    std::vector<easy3d::Drawable *> related_drawables(easy3d::Drawable *reference) const;
+    std::vector<easy3d::Drawable *> target_drawables(easy3d::Drawable *reference) const;
+
+    template <typename DRAWABLE, typename FUNC>
+    void for_each_target_drawable(DRAWABLE *reference, const FUNC& func) const {
+        if (!reference)
+            return;
+
+        for (auto target : target_drawables(reference)) {
+            if (auto typed = dynamic_cast<DRAWABLE *>(target))
+                func(typed);
+        }
+    }
 
 protected:
     MainWindow*     window_;

@@ -215,22 +215,22 @@ std::vector<QString> WidgetPointsDrawable::colorSchemes(const easy3d::Model *mod
     std::vector<QString> schemes;
     schemes.emplace_back("uniform color");
 
-    auto cloud = dynamic_cast<PointCloud *>(viewer_->currentModel());
+    auto cloud = dynamic_cast<const PointCloud *>(model);
     if (cloud)
         internal::color_schemes_for_scalar_fields(cloud, scalar_prefix_, schemes);
 
     else {
-        auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+        auto mesh = dynamic_cast<const SurfaceMesh *>(model);
         if (mesh)
             internal::color_schemes_for_scalar_fields(mesh, scalar_prefix_, schemes);
 
         else {
-            auto graph = dynamic_cast<Graph *>(viewer_->currentModel());
+            auto graph = dynamic_cast<const Graph *>(model);
             if (graph)
                 internal::color_schemes_for_scalar_fields(graph, scalar_prefix_, schemes);
 
             else {
-                auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
+                auto poly = dynamic_cast<const PolyMesh *>(model);
                 if (poly)
                     internal::color_schemes_for_scalar_fields(poly, scalar_prefix_, schemes);
             }
@@ -244,22 +244,22 @@ std::vector<QString> WidgetPointsDrawable::colorSchemes(const easy3d::Model *mod
 std::vector<QString> WidgetPointsDrawable::vectorFields(const easy3d::Model *model) {
     std::vector<QString> fields;
 
-    auto cloud = dynamic_cast<PointCloud *>(viewer_->currentModel());
+    auto cloud = dynamic_cast<const PointCloud *>(model);
     if (cloud)
         internal::vector_fields_on_vertices(cloud, fields);
 
     else {
-        auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
+        auto mesh = dynamic_cast<const SurfaceMesh *>(model);
         if (mesh)
             internal::vector_fields_on_vertices(mesh, fields);
 
         else {
-            auto graph = dynamic_cast<Graph *>(viewer_->currentModel());
+            auto graph = dynamic_cast<const Graph *>(model);
             if (graph)
                 internal::vector_fields_on_vertices(graph, fields);
 
             else {
-                auto poly = dynamic_cast<PolyMesh *>(viewer_->currentModel());
+                auto poly = dynamic_cast<const PolyMesh *>(model);
                 if (poly)
                     internal::vector_fields_on_vertices(poly, fields);
             }
@@ -300,6 +300,9 @@ void WidgetPointsDrawable::updatePanel() {
     for (auto dd : drawables)
         ui_->comboBoxDrawables->addItem(QString::fromStdString(dd->name()));
     ui_->comboBoxDrawables->setCurrentText(QString::fromStdString(d->name()));
+    ui_->checkBoxApplyToAll->setEnabled(related_drawables(d).size() > 1);
+    if (!ui_->checkBoxApplyToAll->isEnabled())
+        ui_->checkBoxApplyToAll->setChecked(false);
 
     // visible
     ui_->checkBoxVisible->setChecked(d->is_visible());
@@ -333,7 +336,7 @@ void WidgetPointsDrawable::updatePanel() {
 
     {   // color scheme
         ui_->comboBoxColorScheme->clear();
-        const std::vector<QString> &schemes = colorSchemes(viewer_->currentModel());
+        const std::vector<QString> &schemes = colorSchemes(model);
         for (const auto &s : schemes)
             ui_->comboBoxColorScheme->addItem(s);
 
@@ -385,7 +388,7 @@ void WidgetPointsDrawable::updatePanel() {
 
     {   // vector field
         ui_->comboBoxVectorField->clear();
-        const std::vector<QString> &fields = vectorFields(viewer_->currentModel());
+        const std::vector<QString> &fields = vectorFields(model);
         for (const auto& name : fields)
             ui_->comboBoxVectorField->addItem(name);
 
@@ -445,47 +448,47 @@ void WidgetPointsDrawable::setActiveDrawable(const QString &text) {
 
 void WidgetPointsDrawable::setPointSize(double s) {
     auto d = dynamic_cast<PointsDrawable*>(drawable());
-    d->set_point_size(s);
+    for_each_target_drawable(d, [s](PointsDrawable *target) {
+        target->set_point_size(s);
+    });
     viewer_->update();
 }
 
 
 void WidgetPointsDrawable::setImposterStyle(const QString &style) {
     auto d = dynamic_cast<PointsDrawable*>(drawable());
-    if (style == "plain")
-        d->set_impostor_type(PointsDrawable::PLAIN);
-    else if (style == "sphere")
-        d->set_impostor_type(PointsDrawable::SPHERE);
-    else if (style == "surfel") {
-        if (d->normal_buffer() == 0) { // surfel requires point normals
-            auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel());
-            if (mesh) {
-                auto normals = mesh->get_vertex_property<vec3>("v:normal");
-                if (!normals) {
-                    mesh->update_vertex_normals();
-                    normals = mesh->get_vertex_property<vec3>("v:normal");
-                }
-                viewer_->makeCurrent();
-                d->update_normal_buffer(normals.vector());
-                viewer_->doneCurrent();
-            } else if (dynamic_cast<PointCloud *>(viewer_->currentModel())) {
-                if (d->normal_buffer() == 0) { // surfel requires point normals
-                    auto cloud = dynamic_cast<PointCloud *>(viewer_->currentModel());
+    for_each_target_drawable(d, [&](PointsDrawable *target) {
+        if (style == "plain")
+            target->set_impostor_type(PointsDrawable::PLAIN);
+        else if (style == "sphere")
+            target->set_impostor_type(PointsDrawable::SPHERE);
+        else if (style == "surfel") {
+            if (target->normal_buffer() == 0) {
+                if (auto mesh = dynamic_cast<SurfaceMesh *>(viewer_->currentModel())) {
+                    auto normals = mesh->get_vertex_property<vec3>("v:normal");
+                    if (!normals) {
+                        mesh->update_vertex_normals();
+                        normals = mesh->get_vertex_property<vec3>("v:normal");
+                    }
+                    viewer_->makeCurrent();
+                    target->update_normal_buffer(normals.vector());
+                    viewer_->doneCurrent();
+                } else if (auto cloud = dynamic_cast<PointCloud *>(viewer_->currentModel())) {
                     auto normals = cloud->get_vertex_property<vec3>("v:normal");
                     if (normals) {
                         viewer_->makeCurrent();
-                        d->update_normal_buffer(normals.vector());
+                        target->update_normal_buffer(normals.vector());
                         viewer_->doneCurrent();
                     }
                 }
             }
-        }
 
-        if (d->normal_buffer())
-            d->set_impostor_type(PointsDrawable::SURFEL);
-        else
-            LOG(WARNING) << "point imposter SURFEL requires normal information";
-    }
+            if (target->normal_buffer())
+                target->set_impostor_type(PointsDrawable::SURFEL);
+            else
+                LOG(WARNING) << "point imposter SURFEL requires normal information";
+        }
+    });
 
     viewer_->update();
     disableUnavailableOptions();
@@ -511,7 +514,9 @@ void WidgetPointsDrawable::setDefaultColor() {
     const QColor &color = QColorDialog::getColor(orig, this);
     if (color.isValid()) {
         const vec4 new_color(color.redF(), color.greenF(), color.blueF(), color.alphaF());
-        d->set_uniform_coloring(new_color);
+        for_each_target_drawable(dynamic_cast<PointsDrawable *>(d), [&](PointsDrawable *target) {
+            target->set_uniform_coloring(new_color);
+        });
         viewer_->update();
 
         QPixmap pixmap(ui_->toolButtonDefaultColor->size());
@@ -528,7 +533,9 @@ void WidgetPointsDrawable::setBackColor() {
     const QColor &color = QColorDialog::getColor(orig, this);
     if (color.isValid()) {
         const vec4 new_color(color.redF(), color.greenF(), color.blueF(), color.alphaF());
-        d->set_back_color(new_color);
+        for_each_target_drawable(dynamic_cast<PointsDrawable *>(d), [&](PointsDrawable *target) {
+            target->set_back_color(new_color);
+        });
         viewer_->update();
 
         QPixmap pixmap(ui_->toolButtonBackColor->size());
@@ -540,6 +547,7 @@ void WidgetPointsDrawable::setBackColor() {
 
 void WidgetPointsDrawable::setVectorField(const QString &text) {
     auto model = viewer_->currentModel();
+    auto current = dynamic_cast<PointsDrawable *>(drawable());
 
     if (text == "disabled") {
         const auto &drawables = model->renderer()->lines_drawables();
@@ -547,7 +555,9 @@ void WidgetPointsDrawable::setVectorField(const QString &text) {
             if (d->name().find("vector - v") != std::string::npos)
                 d->set_visible(false);
         }
-        states_[drawable()].vector_field = "disabled";
+        for_each_target_drawable(current, [&](PointsDrawable *target) {
+            states_[target].vector_field = "disabled";
+        });
     } else {
         const std::string &name = text.toStdString();
         updateVectorFieldBuffer(model, name);
@@ -555,7 +565,9 @@ void WidgetPointsDrawable::setVectorField(const QString &text) {
         auto d = model->renderer()->get_lines_drawable("vector - " + name);
         if (d) {
             d->set_visible(true);
-            states_[drawable()].vector_field = text;
+            for_each_target_drawable(current, [&](PointsDrawable *target) {
+                states_[target].vector_field = text;
+            });
         }
     }
 
@@ -668,4 +680,9 @@ void WidgetPointsDrawable::disableUnavailableOptions() {
 
     update();
     qApp->processEvents();
+}
+
+
+bool WidgetPointsDrawable::shouldApplyToAllDrawables() const {
+    return ui_->checkBoxApplyToAll->isChecked();
 }

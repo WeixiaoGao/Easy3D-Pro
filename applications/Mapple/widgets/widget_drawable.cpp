@@ -28,7 +28,9 @@
 #include "widget_drawable.h"
 
 #include <easy3d/renderer/texture_manager.h>
+#include <easy3d/renderer/drawable_points.h>
 #include <easy3d/renderer/drawable_lines.h>
+#include <easy3d/renderer/drawable_triangles.h>
 #include <easy3d/renderer/renderer.h>
 #include <easy3d/core/model.h>
 #include <easy3d/util/file_system.h>
@@ -109,8 +111,13 @@ Texture *WidgetDrawable::colormapTexture(int idx, bool discrete, int num_stripes
 
 void WidgetDrawable::setDrawableVisible(bool b) {
     auto d = drawable();
-    d->set_visible(b);
-    window_->widgetModelList()->updateDrawableVisibility(d);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d))
+        target->set_visible(b);
+
+    window_->widgetModelList()->updateDrawableVisibilities();
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -118,14 +125,19 @@ void WidgetDrawable::setDrawableVisible(bool b) {
 
 void WidgetDrawable::setLighting(const QString &text) {
     auto d = drawable();
-    if (text == "front and back") {
-        d->set_lighting(true);
-        d->set_lighting_two_sides(true);
-    } else if (text == "front only") {
-        d->set_lighting(true);
-        d->set_lighting_two_sides(false);
-    } else if (text == "disabled") {
-        d->set_lighting(false);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d)) {
+        if (text == "front and back") {
+            target->set_lighting(true);
+            target->set_lighting_two_sides(true);
+        } else if (text == "front only") {
+            target->set_lighting(true);
+            target->set_lighting_two_sides(false);
+        } else if (text == "disabled") {
+            target->set_lighting(false);
+        }
     }
 
     viewer_->update();
@@ -135,9 +147,15 @@ void WidgetDrawable::setLighting(const QString &text) {
 
 void WidgetDrawable::setScalarFieldStyle(int idx) {
     auto d = drawable();
-    states_[d].scalar_style = idx;
-    auto tex = colormapTexture(states_[d].scalar_style, states_[d].discrete_color, states_[d].num_stripes);
-    d->set_texture(tex);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d)) {
+        states_[target].scalar_style = idx;
+        auto tex = colormapTexture(states_[target].scalar_style, states_[target].discrete_color, states_[target].num_stripes);
+        target->set_texture(tex);
+    }
+
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -145,9 +163,15 @@ void WidgetDrawable::setScalarFieldStyle(int idx) {
 
 void WidgetDrawable::setScalarFieldDiscreteColors(bool b) {
     auto d = drawable();
-    states_[d].discrete_color = b;
-    auto tex = colormapTexture(states_[d].scalar_style, states_[d].discrete_color, states_[d].num_stripes);
-    d->set_texture(tex);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d)) {
+        states_[target].discrete_color = b;
+        auto tex = colormapTexture(states_[target].scalar_style, states_[target].discrete_color, states_[target].num_stripes);
+        target->set_texture(tex);
+    }
+
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -155,17 +179,29 @@ void WidgetDrawable::setScalarFieldDiscreteColors(bool b) {
 
 void WidgetDrawable::setScalarFieldNumOfStripes(int num) {
     auto d = drawable();
-    states_[d].num_stripes = num;
-    auto tex = colormapTexture(states_[d].scalar_style, states_[d].discrete_color, states_[d].num_stripes);
-    d->set_texture(tex);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d)) {
+        states_[target].num_stripes = num;
+        auto tex = colormapTexture(states_[target].scalar_style, states_[target].discrete_color, states_[target].num_stripes);
+        target->set_texture(tex);
+    }
+
     viewer_->update();
 }
 
 
 void WidgetDrawable::setScalarFieldClamp(bool b) {
     auto d = drawable();
-    d->set_clamp_range(b);
-    d->update();
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d)) {
+        target->set_clamp_range(b);
+        target->update();
+    }
+
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -173,30 +209,44 @@ void WidgetDrawable::setScalarFieldClamp(bool b) {
 
 void WidgetDrawable::setScalarFieldClampLower(double v) {
     auto d = drawable();
+    if (!d)
+        return;
+
     if (d->clamp_upper() * 100 + v < 100) {
-        d->set_clamp_lower(v / 100.0f);
-        d->update();
+        for (auto target : target_drawables(d)) {
+            target->set_clamp_lower(v / 100.0f);
+            target->update();
+        }
         viewer_->update();
-    }
-    else
+    } else
         LOG(WARNING) << "invalid clamp range (the sum of lower and upper must be smaller than 100)";
 }
 
 
 void WidgetDrawable::setScalarFieldClampUpper(double v) {
     auto d = drawable();
+    if (!d)
+        return;
+
     if (d->clamp_lower() * 100 + v < 100) {
-        d->set_clamp_upper(v / 100.0f);
-        d->update();
+        for (auto target : target_drawables(d)) {
+            target->set_clamp_upper(v / 100.0f);
+            target->update();
+        }
         viewer_->update();
-    }
-    else
+    } else
         LOG(WARNING) << "invalid clamp range (the sum of lower and upper must be smaller than 100)";
 }
 
 
 void WidgetDrawable::setHighlight(bool b) {
-    drawable()->set_highlight(b);
+    auto d = drawable();
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d))
+        target->set_highlight(b);
+
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -219,7 +269,13 @@ void WidgetDrawable::setHighlightMax(int v) {
 
 
 void WidgetDrawable::setDistinctBackColor(bool b) {
-    drawable()->set_distinct_back_color(b);
+    auto d = drawable();
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d))
+        target->set_distinct_back_color(b);
+
     viewer_->update();
     disableUnavailableOptions();
 }
@@ -227,26 +283,46 @@ void WidgetDrawable::setDistinctBackColor(bool b) {
 
 void WidgetDrawable::setTextureRepeat(int r) {
     auto d = drawable();
-    d->set_texture_repeat(r);
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d))
+        target->set_texture_repeat(r);
+
     viewer_->update();
 }
 
 
 void WidgetDrawable::setTextureFractionalRepeat(int r) {
-    drawable()->set_texture_fractional_repeat(r);
+    auto d = drawable();
+    if (!d)
+        return;
+
+    for (auto target : target_drawables(d))
+        target->set_texture_fractional_repeat(r);
+
     viewer_->update();
 }
 
 
 void WidgetDrawable::setVectorFieldScale(double s) {
     auto d = drawable();
-    states_[d].vector_field_scale = s;
+    if (!d)
+        return;
 
-    auto drawa = viewer_->currentModel()->renderer()->get_lines_drawable("vector - " + states_[d].vector_field.toStdString());
-    if (drawa) {
-        drawa->update();
-        viewer_->update();
+    bool updated = false;
+    for (auto target : target_drawables(d)) {
+        states_[target].vector_field_scale = s;
+
+        auto drawa = viewer_->currentModel()->renderer()->get_lines_drawable("vector - " + states_[target].vector_field.toStdString());
+        if (drawa) {
+            drawa->update();
+            updated = true;
+        }
     }
+
+    if (updated)
+        viewer_->update();
 }
 
 
@@ -279,11 +355,12 @@ State::Method WidgetDrawable::color_method(const std::string& name, const std::s
 
 // get the color location from the color scheme name
 State::Location WidgetDrawable::color_location(const std::string& name) const {
-    if (name.find("e:") != std::string::npos)
+    const auto property = color_property_name(name, scalar_prefix_.toStdString());
+    if (property.rfind("e:", 0) == 0)
         return State::EDGE;
-    else if (name.find("h:") != std::string::npos)
+    else if (property.rfind("h:", 0) == 0)
         return State::HALFEDGE;
-    else if (name.find("f:") != std::string::npos)
+    else if (property.rfind("f:", 0) == 0)
         return State::FACE;
     else
         return State::VERTEX;
@@ -292,26 +369,103 @@ State::Location WidgetDrawable::color_location(const std::string& name) const {
 
 void WidgetDrawable::setColorScheme(const QString &text) {
     auto d = drawable();
-    auto& state = d->state();
+    if (!d)
+        return;
 
-    state.set_coloring(
-            color_method(text.toStdString(), scalar_prefix_.toStdString()),
-            color_location(text.toStdString()),
-            color_property_name(text.toStdString(), scalar_prefix_.toStdString())
-    );
-    
-    if (state.coloring_method() == State::TEXTURED || state.coloring_method() == State::SCALAR_FIELD) {
-        state.set_texture(colormapTexture(states_[d].scalar_style, states_[d].discrete_color, states_[d].num_stripes));
-        if (state.coloring_method() == State::SCALAR_FIELD) {
-            state.set_texture_repeat(1.0f);
-            state.set_texture_fractional_repeat(0.0f);
+    const auto scheme_name = text.toStdString();
+    const auto method = color_method(scheme_name, scalar_prefix_.toStdString());
+    const auto location = color_location(scheme_name);
+    const auto property = color_property_name(scheme_name, scalar_prefix_.toStdString());
+    const auto reference_state = states_[d];
+
+    for (auto target : target_drawables(d)) {
+        states_[target].scalar_style = reference_state.scalar_style;
+        states_[target].discrete_color = reference_state.discrete_color;
+        states_[target].num_stripes = reference_state.num_stripes;
+
+        auto& state = target->state();
+        state.set_coloring(method, location, property);
+
+        if (state.coloring_method() == State::TEXTURED || state.coloring_method() == State::SCALAR_FIELD) {
+            state.set_texture(colormapTexture(states_[target].scalar_style, states_[target].discrete_color, states_[target].num_stripes));
+            if (state.coloring_method() == State::SCALAR_FIELD) {
+                state.set_texture_repeat(1.0f);
+                state.set_texture_fractional_repeat(0.0f);
+            }
         }
-    }
 
-    d->update();
+        target->update();
+    }
 
     viewer_->update();
     window_->enableCameraManipulation();
 
     updatePanel();
+}
+
+
+std::string WidgetDrawable::drawable_group_name(const easy3d::Drawable *drawable) const {
+    if (!drawable)
+        return "";
+
+    const auto& name = drawable->name();
+    const auto pos = name.find(':');
+    if (pos == std::string::npos)
+        return name;
+
+    return name.substr(0, pos);
+}
+
+
+std::vector<easy3d::Drawable *> WidgetDrawable::related_drawables(easy3d::Drawable *reference) const {
+    std::vector<easy3d::Drawable *> result;
+    if (!reference)
+        return result;
+
+    result.push_back(reference);
+    auto model = reference->model();
+    if (!model || !model->renderer())
+        return result;
+
+    result.clear();
+    const auto group = drawable_group_name(reference);
+    switch (reference->type()) {
+        case Drawable::DT_POINTS:
+            for (const auto& drawable : model->renderer()->points_drawables()) {
+                if (drawable_group_name(drawable.get()) == group)
+                    result.push_back(drawable.get());
+            }
+            break;
+        case Drawable::DT_LINES:
+            for (const auto& drawable : model->renderer()->lines_drawables()) {
+                if (drawable_group_name(drawable.get()) == group)
+                    result.push_back(drawable.get());
+            }
+            break;
+        case Drawable::DT_TRIANGLES:
+            for (const auto& drawable : model->renderer()->triangles_drawables()) {
+                if (drawable_group_name(drawable.get()) == group)
+                    result.push_back(drawable.get());
+            }
+            break;
+        default:
+            result.push_back(reference);
+            break;
+    }
+
+    if (result.empty())
+        result.push_back(reference);
+
+    return result;
+}
+
+
+std::vector<easy3d::Drawable *> WidgetDrawable::target_drawables(easy3d::Drawable *reference) const {
+    if (!reference)
+        return {};
+
+    if (!shouldApplyToAllDrawables())
+        return {reference};
+
+    return related_drawables(reference);
 }
