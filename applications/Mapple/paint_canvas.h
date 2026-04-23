@@ -40,7 +40,9 @@
 
 namespace easy3d {
     class Camera;
+    class Graph;
     class Model;
+    class PointsDrawable;
     class LinesDrawable;
     class TrianglesDrawable;
     class AmbientOcclusion;
@@ -152,6 +154,8 @@ public:
 public slots:
     // centers the entire scene to fit the screen region.
     void fitScreen();
+
+    void enableMeasureDistance(bool);
 
     void showPrimitiveIDUnderMouse(bool);
     void showPrimitivePropertyUnderMouse(bool);
@@ -281,6 +285,13 @@ protected:
     void drawCornerAxes();
     void drawPickedFaceAndItsVerticesIDs();
     void drawPickedVertexID();
+    bool pickMeasurePoint(const QPoint& p, easy3d::vec3& picked);
+    bool pickGraphPoint(const QPoint& p, const easy3d::Graph* graph, easy3d::vec3& picked,
+                        float& best_squared_distance) const;
+    void handleMeasureDistanceClick(const QPoint& p);
+    void clearMeasureDistance();
+    void drawMeasureDistance();
+    std::string measureDistanceText() const;
 
 protected:
     MainWindow* window_;
@@ -312,6 +323,8 @@ protected:
     easy3d::TrianglesDrawable* drawable_axes_;
     // anchor sphere and manipulated frame
     easy3d::LinesDrawable* drawable_manip_sphere_;
+    easy3d::LinesDrawable* drawable_measure_distance_;
+    easy3d::PointsDrawable* drawable_measure_distance_points_;
 
     easy3d::ModelPicker* model_picker_;
     bool    allow_select_model_;
@@ -322,6 +335,12 @@ protected:
     bool    show_primitive_id_under_mouse_;
     bool    show_primitive_property_under_mouse_;
     bool    show_coordinates_under_mouse_;
+    bool    measure_distance_enabled_;
+    bool    measure_distance_has_start_;
+    bool    measure_distance_has_end_;
+    bool    measure_distance_drawable_dirty_;
+    easy3d::vec3 measure_distance_start_;
+    easy3d::vec3 measure_distance_end_;
 
     std::vector< std::shared_ptr<easy3d::Model> > models_;
     int model_idx_;

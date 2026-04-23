@@ -1067,6 +1067,7 @@ void MainWindow::createActionsForSelectMenu() {
     actionGroup->addAction(ui->actionSelectClick);
     actionGroup->addAction(ui->actionSelectRect);
     actionGroup->addAction(ui->actionSelectLasso);
+    actionGroup->addAction(ui->actionMeasureDistance);
 
     connect(actionGroup, SIGNAL(triggered(QAction*)), this, SLOT(operationModeChanged(QAction*)));
 }
@@ -1135,6 +1136,14 @@ void MainWindow::createActionsForPolyMeshMenu() {
 
 
 void MainWindow::operationModeChanged(QAction* act) {
+    if (act == ui->actionMeasureDistance) {
+        viewer()->tool_manager()->set_tool(tools::ToolManager::EMPTY_TOOL);
+        viewer()->enableMeasureDistance(true);
+        return;
+    }
+
+    viewer()->enableMeasureDistance(false);
+
     if (act == ui->actionCameraManipulation) {
         viewer()->tool_manager()->set_tool(tools::ToolManager::EMPTY_TOOL);
         return;

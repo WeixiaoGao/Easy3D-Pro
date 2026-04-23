@@ -27,7 +27,10 @@
 
 #include "paint_canvas.h"
 
+#include <algorithm>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 
 #include <QKeyEvent>
 #include <QOpenGLFunctions>
@@ -101,6 +104,8 @@ PaintCanvas::PaintCanvas(MainWindow* window)
         , show_manip_sphere_(false)
         , drawable_axes_(nullptr)
         , drawable_manip_sphere_(nullptr)
+        , drawable_measure_distance_(nullptr)
+        , drawable_measure_distance_points_(nullptr)
         , model_picker_(nullptr)
         , allow_select_model_(false)
         , surface_mesh_picker_(nullptr)
@@ -110,6 +115,12 @@ PaintCanvas::PaintCanvas(MainWindow* window)
         , point_cloud_picker_(nullptr)
         , picked_vertex_index_(-1)
         , show_coordinates_under_mouse_(false)
+        , measure_distance_enabled_(false)
+        , measure_distance_has_start_(false)
+        , measure_distance_has_end_(false)
+        , measure_distance_drawable_dirty_(false)
+        , measure_distance_start_(0, 0, 0)
+        , measure_distance_end_(0, 0, 0)
         , model_idx_(-1)
         , ssao_(nullptr)
 {
@@ -150,6 +161,8 @@ void PaintCanvas::cleanup() {
     delete walkThrough();
     delete drawable_axes_;
     delete drawable_manip_sphere_;
+    delete drawable_measure_distance_;
+    delete drawable_measure_distance_points_;
     delete ssao_;
     delete shadow_;
     delete transparency_;
@@ -276,11 +289,167 @@ void PaintCanvas::showAxes(bool b) {
 }
 
 
+void PaintCanvas::enableMeasureDistance(bool b) {
+    measure_distance_enabled_ = b;
+    clearMeasureDistance();
+
+    if (measure_distance_enabled_)
+        window_->statusBar()->showMessage("Distance measurement: click the start point", 0);
+    else
+        window_->statusBar()->clearMessage();
+
+    update();
+}
+
+
+void PaintCanvas::clearMeasureDistance() {
+    measure_distance_has_start_ = false;
+    measure_distance_has_end_ = false;
+    measure_distance_drawable_dirty_ = true;
+}
+
+
+std::string PaintCanvas::measureDistanceText() const {
+    std::ostringstream output;
+    output << "Distance: " << std::setprecision(10) << distance(measure_distance_start_, measure_distance_end_);
+    return output.str();
+}
+
+
+bool PaintCanvas::pickGraphPoint(const QPoint& p, const Graph* graph, vec3& picked,
+                                 float& best_squared_distance) const {
+    if (!graph || !graph->renderer()->is_visible())
+        return false;
+
+    const auto vertices = graph->renderer()->get_points_drawable("vertices", false);
+    const auto edges = graph->renderer()->get_lines_drawable("edges", false);
+    const bool pick_vertices = vertices && vertices->is_visible();
+    const bool pick_edges = edges && edges->is_visible();
+    if (!pick_vertices && !pick_edges)
+        return false;
+
+    bool found = false;
+    const mat4 manip = graph->manipulator()->matrix();
+    const vec2 cursor(static_cast<float>(p.x()), static_cast<float>(p.y()));
+
+    if (pick_vertices) {
+        const float threshold = std::max(8.0f, vertices->point_size() * 0.5f + 4.0f);
+        const float threshold2 = threshold * threshold;
+        for (auto v : graph->vertices()) {
+            const vec3 world = manip * graph->position(v);
+            const vec3 projected = camera()->projectedCoordinatesOf(world);
+            if (projected.z < 0.0f || projected.z > 1.0f)
+                continue;
+
+            const vec2 screen(projected.x, projected.y);
+            const float d2 = distance2(cursor, screen);
+            if (d2 <= threshold2 && d2 < best_squared_distance) {
+                best_squared_distance = d2;
+                picked = world;
+                found = true;
+            }
+        }
+    }
+
+    if (pick_edges) {
+        const float threshold = std::max(6.0f, edges->line_width() * 0.5f + 3.0f);
+        const float threshold2 = threshold * threshold;
+        for (auto e : graph->edges()) {
+            const vec3 source = manip * graph->position(graph->source(e));
+            const vec3 target = manip * graph->position(graph->target(e));
+            const vec3 source_proj = camera()->projectedCoordinatesOf(source);
+            const vec3 target_proj = camera()->projectedCoordinatesOf(target);
+            if ((source_proj.z < 0.0f || source_proj.z > 1.0f) &&
+                (target_proj.z < 0.0f || target_proj.z > 1.0f))
+                continue;
+
+            const vec2 a(source_proj.x, source_proj.y);
+            const vec2 b(target_proj.x, target_proj.y);
+            const vec2 ab = b - a;
+            const float length2 = dot(ab, ab);
+            if (length2 <= std::numeric_limits<float>::epsilon())
+                continue;
+
+            const float t = std::max(0.0f, std::min(1.0f, dot(cursor - a, ab) / length2));
+            const vec2 closest = a + t * ab;
+            const float d2 = distance2(cursor, closest);
+            if (d2 <= threshold2 && d2 < best_squared_distance) {
+                best_squared_distance = d2;
+                picked = source + t * (target - source);
+                found = true;
+            }
+        }
+    }
+
+    return found;
+}
+
+
+bool PaintCanvas::pickMeasurePoint(const QPoint& p, vec3& picked) {
+    float best_graph_distance2 = std::numeric_limits<float>::max();
+    if (pickGraphPoint(p, dynamic_cast<const Graph*>(currentModel()), picked, best_graph_distance2))
+        return true;
+
+    bool found = false;
+    picked = pointUnderPixel(p, found);
+    if (found)
+        return true;
+
+    for (const auto& model : models_) {
+        const auto graph = dynamic_cast<const Graph*>(model.get());
+        if (graph != currentModel())
+            pickGraphPoint(p, graph, picked, best_graph_distance2);
+    }
+
+    return best_graph_distance2 < std::numeric_limits<float>::max();
+}
+
+
+void PaintCanvas::handleMeasureDistanceClick(const QPoint& p) {
+    vec3 picked;
+    if (!pickMeasurePoint(p, picked)) {
+        window_->statusBar()->showMessage("Distance measurement: no geometry under cursor", 2000);
+        return;
+    }
+
+    if (!measure_distance_has_start_ || measure_distance_has_end_) {
+        measure_distance_start_ = picked;
+        measure_distance_has_start_ = true;
+        measure_distance_has_end_ = false;
+        measure_distance_drawable_dirty_ = true;
+        window_->statusBar()->showMessage("Distance measurement: start point selected, click the end point", 0);
+    }
+    else {
+        measure_distance_end_ = picked;
+        measure_distance_has_end_ = true;
+        measure_distance_drawable_dirty_ = true;
+        const std::string text = measureDistanceText();
+        window_->statusBar()->showMessage(QString::fromStdString(text), 0);
+        LOG(INFO) << text << " from " << measure_distance_start_ << " to " << measure_distance_end_;
+    }
+}
+
+
 void PaintCanvas::mousePressEvent(QMouseEvent *e) {
     pressed_button_ = e->button();
     modifiers_ = e->modifiers();
     mouse_current_pos_ = e->pos();
     mouse_pressed_pos_ = e->pos();
+
+    if (measure_distance_enabled_) {
+        if (e->button() == Qt::LeftButton && e->modifiers() == Qt::NoModifier)
+            handleMeasureDistanceClick(e->pos());
+        else if (e->button() == Qt::RightButton) {
+            clearMeasureDistance();
+            window_->statusBar()->showMessage("Distance measurement: click the start point", 0);
+        }
+
+        pressed_button_ = Qt::NoButton;
+        modifiers_ = Qt::NoModifier;
+        update();
+        QOpenGLWidget::mousePressEvent(e);
+        return;
+    }
 
     if (tool_manager()->current_tool()) {
         tools::ToolButton bt = tools::NO_BUTTON;
@@ -373,6 +542,14 @@ void PaintCanvas::mousePressEvent(QMouseEvent *e) {
 
 
 void PaintCanvas::mouseReleaseEvent(QMouseEvent *e) {
+    if (measure_distance_enabled_) {
+        pressed_button_ = Qt::NoButton;
+        modifiers_ = Qt::NoModifier;
+        mouse_current_pos_ = e->pos();
+        QOpenGLWidget::mouseReleaseEvent(e);
+        return;
+    }
+
     if (tool_manager()->current_tool()) {
         tools::ToolButton bt = tools::NO_BUTTON;
         if (e->button() == Qt::LeftButton) {
@@ -458,6 +635,12 @@ void PaintCanvas::mouseMoveEvent(QMouseEvent *e) {
     int x = e->pos().x(), y = e->pos().y();
     if (x < 0 || x > width() || y < 0 || y > height() || walkThrough()->interpolator()->is_interpolation_started()) {
         e->ignore();
+        return;
+    }
+
+    if (measure_distance_enabled_) {
+        mouse_current_pos_ = e->pos();
+        QOpenGLWidget::mouseMoveEvent(e);
         return;
     }
 
@@ -655,6 +838,13 @@ void PaintCanvas::setCurrentModel(easy3d::Model *m) {
 
 
 void PaintCanvas::keyPressEvent(QKeyEvent *e) {
+    if (measure_distance_enabled_ && e->key() == Qt::Key_Escape) {
+        clearMeasureDistance();
+        window_->statusBar()->showMessage("Distance measurement: click the start point", 0);
+        update();
+        return;
+    }
+
     if (e->key() == Qt::Key_Left && e->modifiers() == Qt::KeypadModifier) {
         auto angle = static_cast<float>(1 * M_PI / 180.0); // turn left, 1 degrees each step
         camera_->frame()->action_turn(angle, camera_);
@@ -1327,6 +1517,56 @@ void PaintCanvas::drawPickedVertexID() {
 }
 
 
+void PaintCanvas::drawMeasureDistance() {
+    if (!measure_distance_has_start_)
+        return;
+
+    if (!drawable_measure_distance_) {
+        drawable_measure_distance_ = new LinesDrawable("measure_distance_line");
+        drawable_measure_distance_->set_uniform_coloring(vec4(1.0f, 0.1f, 0.0f, 1.0f));
+        drawable_measure_distance_->set_line_width(3.0f * dpiScaling());
+    }
+
+    if (!drawable_measure_distance_points_) {
+        drawable_measure_distance_points_ = new PointsDrawable("measure_distance_points");
+        drawable_measure_distance_points_->set_uniform_coloring(vec4(1.0f, 0.1f, 0.0f, 1.0f));
+        drawable_measure_distance_points_->set_point_size(10.0f * dpiScaling());
+        drawable_measure_distance_points_->set_impostor_type(PointsDrawable::SPHERE);
+    }
+
+    if (measure_distance_drawable_dirty_) {
+        std::vector<vec3> points(1, measure_distance_start_);
+        if (measure_distance_has_end_)
+            points.push_back(measure_distance_end_);
+        drawable_measure_distance_points_->update_vertex_buffer(points, true);
+
+        if (measure_distance_has_end_)
+            drawable_measure_distance_->update_vertex_buffer({measure_distance_start_, measure_distance_end_}, true);
+
+        measure_distance_drawable_dirty_ = false;
+    }
+
+    GLboolean last_enable_depth_test = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    if (measure_distance_has_end_)
+        drawable_measure_distance_->draw(camera_);
+    drawable_measure_distance_points_->draw(camera_);
+    if (last_enable_depth_test)
+        glEnable(GL_DEPTH_TEST);
+
+    if (measure_distance_has_end_ && texter_ && texter_->num_fonts() >= 2) {
+        const vec3 midpoint = (measure_distance_start_ + measure_distance_end_) * 0.5f;
+        const vec3 pos = camera()->projectedCoordinatesOf(midpoint);
+        texter_->draw(measureDistanceText(),
+                      static_cast<int>(pos.x) * dpiScaling() + static_cast<int>(8 * dpiScaling()),
+                      static_cast<int>(pos.y) * dpiScaling() + static_cast<int>(8 * dpiScaling()),
+                      15, 1, vec3(1.0f, 0.1f, 0.0f)
+        );
+    }
+    easy3d_debug_log_gl_error
+}
+
+
 void PaintCanvas::preDraw() {
     // The Qt6 documentation says (https://doc.qt.io/qt-6/qopenglwidget.html#paintGL):
     //      Default implementation performs a glClear(). Subclasses are not expected to invoke
@@ -1397,6 +1637,8 @@ void PaintCanvas::postDraw() {
         if (last_enable_blend) glEnable(GL_BLEND); else glDisable(GL_BLEND);
         glBlendFunc(last_blend_src, last_blend_dst);
     }
+
+    drawMeasureDistance();
 
     // -------------------- draw a sphere outline
     Model* m = currentModel();

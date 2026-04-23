@@ -109,6 +109,7 @@
     <addaction name="actionSelectClick"/>
     <addaction name="actionSelectRect"/>
     <addaction name="actionSelectLasso"/>
+    <addaction name="actionMeasureDistance"/>
     <addaction name="separator"/>
     <addaction name="actionInvertSelection"/>
     <addaction name="separator"/>
@@ -263,6 +264,7 @@
    <addaction name="actionSelectClick"/>
    <addaction name="actionSelectRect"/>
    <addaction name="actionSelectLasso"/>
+   <addaction name="actionMeasureDistance"/>
    <addaction name="separator"/>
    <addaction name="actionAbout"/>
   </widget>
@@ -853,6 +855,21 @@
    </property>
    <property name="toolTip">
     <string>Select by Clicking</string>
+   </property>
+  </action>
+  <action name="actionMeasureDistance">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="icon">
+    <iconset resource="resources/Mapple.qrc">
+     <normaloff>:/resources/icons/measure_distance.xpm</normaloff>:/resources/icons/measure_distance.xpm</iconset>
+   </property>
+   <property name="text">
+    <string>Measure distance</string>
+   </property>
+   <property name="toolTip">
+    <string>Measure Distance</string>
    </property>
   </action>
   <action name="actionComputeHeightField">
