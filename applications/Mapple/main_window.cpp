@@ -29,6 +29,7 @@
 
 #include <string>
 #include <iostream>
+#include <vector>
 
 #include <QMutex>
 #include <QFileDialog>
@@ -37,7 +38,10 @@
 #include <QSettings>
 #include <QMessageBox>
 #include <QColorDialog>
+#include <QComboBox>
+#include <QDialog>
 #include <QActionGroup>
+#include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QProgressBar>
@@ -478,29 +482,59 @@ bool MainWindow::onSave() {
     if (file_system::extension(default_file_name).empty()) // no extension?
         default_file_name += ".ply"; // default to ply
 
-    const QString& fileName = QFileDialog::getSaveFileName(
-                this,
-                "Save file",
-                QString::fromStdString(default_file_name),
-                "Supported formats (*.ply *.obj *.off *.stl *.sm *.bin *.las *.laz *.xyz *.bxyz *.vg *.bvg *.plm *.pm *.mesh)\n"
-                "Surface Mesh (*.ply *.obj *.off *.stl *.sm)\n"
-                "Point Cloud (*.ply *.bin *.ptx *.las *.laz *.xyz *.bxyz *.vg *.bvg)\n"
-                "Polyhedral Mesh (*.plm *.pm *.mesh)\n"
-                "Graph (*.ply)\n"
+    QFileDialog dialog(this);
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setWindowTitle("Save file");
+    dialog.setNameFilters({
+                "Supported formats (*.ply *.obj *.off *.stl *.sm *.bin *.las *.laz *.xyz *.bxyz *.vg *.bvg *.plm *.pm *.mesh)",
+                "Surface Mesh (*.ply *.obj *.off *.stl *.sm)",
+                "Point Cloud (*.ply *.bin *.ptx *.las *.laz *.xyz *.bxyz *.vg *.bvg)",
+                "Polyhedral Mesh (*.plm *.pm *.mesh)",
+                "Graph (*.ply)",
                 "All formats (*.*)"
-    );
+    });
+    dialog.selectFile(QString::fromStdString(default_file_name));
+    dialog.setAcceptMode(QFileDialog::AcceptSave);
+    dialog.setFileMode(QFileDialog::AnyFile);
+
+    const auto surface_mesh = dynamic_cast<const SurfaceMesh*>(model);
+    QComboBox* plyFormatComboBox = nullptr;
+    if (surface_mesh) {
+        auto plyFormatLabel = new QLabel("PLY format:", &dialog);
+        plyFormatComboBox = new QComboBox(&dialog);
+        plyFormatComboBox->addItem("Binary", true);
+        plyFormatComboBox->addItem("ASCII", false);
+
+        if (auto gridLayout = qobject_cast<QGridLayout*>(dialog.layout())) {
+            const int row = gridLayout->rowCount();
+            gridLayout->addWidget(plyFormatLabel, row, 0);
+            gridLayout->addWidget(plyFormatComboBox, row, 1);
+        }
+    }
+
+    if (dialog.exec() != QDialog::Accepted)
+        return false;
+
+    const QString fileName = dialog.selectedFiles().constFirst();
 
     if (fileName.isEmpty())
         return false;
+
+    const bool save_ply_binary = !plyFormatComboBox || plyFormatComboBox->currentData().toBool();
 
     bool saved = false;
     if (dynamic_cast<const PointCloud*>(model)) {
         const auto cloud = dynamic_cast<const PointCloud*>(model);
         saved = PointCloudIO::save(fileName.toStdString(), cloud);
     }
-    else if (dynamic_cast<const SurfaceMesh*>(model)) {
-        const auto mesh = dynamic_cast<const SurfaceMesh*>(model);
-        saved = SurfaceMeshIO::save(fileName.toStdString(), mesh);
+    else if (surface_mesh) {
+        const auto mesh = surface_mesh;
+        const std::string file_name = fileName.toStdString();
+        const std::string ext = file_system::extension(file_name, true);
+        if (ext == "ply" || ext.empty())
+            saved = SurfaceMeshIO::save(file_name, mesh, std::vector<std::string>(), save_ply_binary);
+        else
+            saved = SurfaceMeshIO::save(file_name, mesh);
     }
     else if (dynamic_cast<const Graph*>(model)) {
         const auto graph = dynamic_cast<const Graph*>(model);
