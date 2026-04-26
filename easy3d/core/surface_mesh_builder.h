@@ -57,6 +57,20 @@ namespace easy3d {
         typedef SurfaceMesh::Vertex   Vertex;   ///< Vertex type.
         typedef SurfaceMesh::Halfedge Halfedge; ///< Halfedge type.
         typedef SurfaceMesh::Face     Face;     ///< Face type.
+
+        /// \brief Statistics reported by topology repair.
+        struct TopologyRepairStats {
+            /// Vertices that had to be copied to resolve topological issues.
+            std::size_t num_non_manifold_vertices = 0;
+            /// Non-manifold edges detected during SurfaceMeshBuilder face insertion.
+            std::size_t num_non_manifold_edges = 0;
+            /// Total number of copied vertex occurrences.
+            std::size_t num_vertex_copy_occurrences = 0;
+            /// Isolated vertices removed from the mesh.
+            std::size_t num_isolated_vertices = 0;
+            /// Vertices that remain non-manifold after repair.
+            std::size_t num_remaining_non_manifold_vertices = 0;
+        };
         
     public:
         /**
@@ -124,6 +138,20 @@ namespace easy3d {
          */
         void end_surface(bool log_issues = true);
 
+        /**
+         * \brief Repair the topology of an existing surface mesh.
+         * \details This rebuilds the mesh by replaying its current faces through SurfaceMeshBuilder, then applies the
+         *          same final topology repair used by end_surface(): non-manifold vertices are split by copying
+         *          vertices, outgoing halfedges are adjusted, isolated vertices are removed, and copied vertices are
+         *          marked by the vertex property "v:locked".
+         * \attention Custom vertex, face, and model properties are preserved. Custom edge and halfedge properties are
+         *            discarded because their topology can change during repair.
+         * \param mesh The mesh to repair.
+         * \param log_issues True to log detected issues and the repair summary.
+         * \return Statistics of the repair operation.
+         */
+        static TopologyRepairStats repair_topology(SurfaceMesh* mesh, bool log_issues = true);
+
         // -------------------------------------------------------------------------------------------------------------
 
         /**
@@ -171,6 +199,10 @@ namespace easy3d {
         // @param h The halfedge pointing to the non-manifold vertex.
         // Return the number of vertex copies.
         std::size_t resolve_non_manifold_vertex(Halfedge h, SurfaceMesh *mesh, CopyRecord &copy_record);
+
+        void initialize_repair_context();
+
+        TopologyRepairStats repair_topology_internal(bool log_issues, bool include_builder_face_issues);
 
     private:
         SurfaceMesh *mesh_;

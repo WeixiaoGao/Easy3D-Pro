@@ -49,6 +49,34 @@ namespace easy3d {
 #define EDGE    "edge"
 
 
+        namespace {
+
+            template <typename Properties>
+            bool has_large_list(const Properties& properties) {
+                for (const auto& property : properties) {
+                    for (const auto& values : property) {
+                        if (values.size() > 255)
+                            return true;
+                    }
+                }
+                return false;
+            }
+
+            e_ply_type list_length_type(const std::vector<Element>& elements) {
+                for (const auto& e : elements) {
+                    if (has_large_list(e.int_list_properties) || has_large_list(e.float_list_properties)) {
+                        LOG(WARNING) << "a list property has more than 255 values, thus the length field of PLY list"
+                                        " properties is set to PLY_UINT (this might not be recognized by other software)";
+                        return PLY_UINT;
+                    }
+                }
+
+                return PLY_UCHAR;
+            }
+
+        }
+
+
         std::string Element::property_statistics() const {
             std::string str;
             if (!vec3_properties.empty()) {
@@ -120,30 +148,8 @@ namespace easy3d {
             }
 
 
-            // Liangliang: For most scenarios, the num of vertices in a face is small (i.e., in [0, 255]), and PLY_UCHAR
-            // is enough. In case you want to store faces that have more than 256 vertices, you should choose PLY_UINT.
-            e_ply_type length_type = PLY_UCHAR;
-#ifndef NDEBUG
-            // warn the user if the number of vertices in a face is greater than 255
-            for (const auto& e : elements) {
-                if (e.name == FACE) {
-                    for (const auto& property : e.int_list_properties) {
-                        if (property.name == "vertex_indices") {
-                            for (const auto& p : property) {
-                                if (p.size() > 255) {
-                                    length_type = PLY_UINT;
-                                    LOG(WARNING) << "face has " << p.size()
-                                        << " vertices, thus the length field of the list property 'vertex_indices'"
-                                        " is set to PLY_UINT (this might not be recognized by other software)";
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-#endif
+            // PLY_UCHAR is enough for most list lengths, but it overflows for lists with more than 255 values.
+            e_ply_type length_type = list_length_type(elements);
 
             for (const auto& e : elements) {
                 const std::string& element_name = e.name;
@@ -367,30 +373,8 @@ namespace easy3d {
                 return false;
             }
 
-            // Liangliang: For most scenarios, the num of vertices in a face is small (i.e., in [0, 255]), and PLY_UCHAR
-            // is enough. In case you want to store faces that have more than 256 vertices, you should choose PLY_UINT.
-            e_ply_type length_type = PLY_UCHAR;
-#ifndef NDEBUG
-            // warn the user if the number of vertices in a face is greater than 255
-            for (const auto& e : elements) {
-                if (e.name == FACE) {
-                    for (const auto& property : e.int_list_properties) {
-                        if (property.name == "vertex_indices") {
-                            for (const auto& p : property) {
-                                if (p.size() > 255) {
-                                    length_type = PLY_UINT;
-                                    LOG(WARNING) << "face has " << p.size()
-                                                 << " vertices, thus the length field of the list property 'vertex_indices'"
-                                                    " is set to PLY_UINT (this might not be recognized by other software)";
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-#endif
+            // PLY_UCHAR is enough for most list lengths, but it overflows for lists with more than 255 values.
+            e_ply_type length_type = list_length_type(elements);
 
             for (const auto& e : elements) {
                 const std::string &element_name = e.name;

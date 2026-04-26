@@ -51,7 +51,7 @@ namespace easy3d {
     }
 
 
-    void SurfaceMeshBuilder::begin_surface() {
+    void SurfaceMeshBuilder::initialize_repair_context() {
         num_faces_less_three_vertices_ = 0;
         num_faces_duplicate_vertices = 0;
         num_faces_out_of_range_vertices_ = 0;
@@ -61,12 +61,130 @@ namespace easy3d {
         copied_vertices_.clear();
         copied_vertices_for_linking_.clear();
         outgoing_halfedges_.clear();
+    }
+
+
+    void SurfaceMeshBuilder::begin_surface() {
+        initialize_repair_context();
 
         original_vertex_ = mesh_->add_vertex_property<Vertex>(name_original_vertex);
     }
 
 
     void SurfaceMeshBuilder::end_surface(bool log_issues) {
+        repair_topology_internal(log_issues, true);
+    }
+
+
+    SurfaceMeshBuilder::TopologyRepairStats
+    SurfaceMeshBuilder::repair_topology(SurfaceMesh* mesh, bool log_issues) {
+        TopologyRepairStats stats;
+        if (!mesh) {
+            LOG(ERROR) << "surface mesh is null";
+            return stats;
+        }
+
+        auto skip_property = [](const std::string& name, const std::set<std::string>& skipped) {
+            return skipped.find(name) != skipped.end();
+        };
+
+        auto clone_properties = [&skip_property](const PropertyContainer& from,
+                                                 PropertyContainer& to,
+                                                 const std::set<std::string>& skipped) {
+            for (auto src : from.arrays()) {
+                if (skip_property(src->name(), skipped))
+                    continue;
+
+                bool exists = false;
+                for (auto dst : to.arrays()) {
+                    if (dst->name() == src->name()) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (exists)
+                    continue;
+
+                auto clone = src->empty_clone();
+                clone->resize(to.size());
+                to.arrays().push_back(clone);
+            }
+        };
+
+        auto transfer_properties = [&skip_property](const PropertyContainer& from,
+                                                    const PropertyContainer& to,
+                                                    std::size_t from_idx,
+                                                    std::size_t to_idx,
+                                                    const std::set<std::string>& skipped) {
+            for (auto dst : to.arrays()) {
+                if (skip_property(dst->name(), skipped))
+                    continue;
+
+                for (auto src : from.arrays()) {
+                    if (dst->is_same(*src)) {
+                        dst->transfer(*src, from_idx, to_idx);
+                        break;
+                    }
+                }
+            }
+        };
+
+        const std::set<std::string> skipped_vertex_properties = {
+                "v:connectivity",
+                "v:point",
+                "v:deleted",
+                name_known_nm_vertex,
+                name_visited_vertex,
+                name_visited_halfedge,
+                name_original_vertex
+        };
+        const std::set<std::string> skipped_face_properties = {
+                "f:connectivity",
+                "f:deleted"
+        };
+
+        SurfaceMesh repaired;
+        clone_properties(mesh->vprops_, repaired.vprops_, skipped_vertex_properties);
+        clone_properties(mesh->fprops_, repaired.fprops_, skipped_face_properties);
+        repaired.mprops_ = mesh->mprops_;
+
+        SurfaceMeshBuilder builder(&repaired);
+        builder.begin_surface();
+
+        std::vector<Vertex> vertex_map(mesh->vertices_size());
+        for (auto v : mesh->vertices()) {
+            auto new_v = builder.add_vertex(mesh->position(v));
+            vertex_map[v.idx()] = new_v;
+            transfer_properties(mesh->vprops_, repaired.vprops_,
+                                static_cast<std::size_t>(v.idx()),
+                                static_cast<std::size_t>(new_v.idx()),
+                                skipped_vertex_properties);
+        }
+
+        for (auto f : mesh->faces()) {
+            std::vector<Vertex> vertices;
+            for (auto h : mesh->halfedges(f))
+                vertices.push_back(vertex_map[mesh->target(h).idx()]);
+
+            auto new_f = builder.add_face(vertices);
+            if (new_f.is_valid()) {
+                transfer_properties(mesh->fprops_, repaired.fprops_,
+                                    static_cast<std::size_t>(f.idx()),
+                                    static_cast<std::size_t>(new_f.idx()),
+                                    skipped_face_properties);
+            }
+        }
+
+        stats = builder.repair_topology_internal(log_issues, true);
+        *mesh = repaired;
+        return stats;
+    }
+
+
+    SurfaceMeshBuilder::TopologyRepairStats
+    SurfaceMeshBuilder::repair_topology_internal(bool log_issues, bool include_builder_face_issues) {
+        TopologyRepairStats stats;
+
         // ----------------------------------------------------------------------------------
 
         // Step 1: Resolve non-manifold vertices (also collect data for the report).
@@ -84,11 +202,10 @@ namespace easy3d {
         // now all copy occurrences are known
         // mark all copied vertices in property "v:locked"
         auto locked = mesh_->vertex_property<bool>("v:locked");
-        std::size_t num_non_manifold_vertices = copied_vertices_.size();
-        std::size_t num_copy_occurrences(0);
+        stats.num_non_manifold_vertices = copied_vertices_.size();
         for (const auto& copies : copied_vertices_) {
             LOG_IF(copies.second.empty(), FATAL) << "vertex " << copies.first << " not actually copied";
-            num_copy_occurrences += copies.second.size();
+            stats.num_vertex_copy_occurrences += copies.second.size();
             for (auto v : copies.second)
                 locked[v] = true;
         }
@@ -96,11 +213,10 @@ namespace easy3d {
         copied_vertices_.clear();
 
         // Query the number of non-manifold edges.
-        std::size_t num_non_manifold_edges(0);
         for (const auto &targets : outgoing_halfedges_) {
             const auto& halfedges = targets.second;
             std::set<int> tmp(halfedges.begin(), halfedges.end());
-            num_non_manifold_edges += (halfedges.size() - tmp.size());
+            stats.num_non_manifold_edges += (halfedges.size() - tmp.size());
         }
 
         // Release memory immediately when not needed any more.
@@ -112,14 +228,13 @@ namespace easy3d {
         mesh_->adjust_outgoing_halfedges();
 
         // Step 3: remove isolated vertices
-        std::size_t num_isolated_vertices(0);
         for (auto v : mesh_->vertices()) {
             if (mesh_->is_isolated(v)) {
                 mesh_->delete_vertex(v);
-                ++num_isolated_vertices;
+                ++stats.num_isolated_vertices;
             }
         }
-        if (num_isolated_vertices > 0)
+        if (stats.num_isolated_vertices > 0)
             mesh_->collect_garbage();
 
         // ---------------------------------------------------------------------------------
@@ -142,68 +257,70 @@ namespace easy3d {
         }
 
         // Check if there are still non-manifold vertices
-        std::size_t count(0);
         for (auto v : mesh_->vertices()) {
             if (!mesh_->is_manifold(v)) {
                 LOG_N_TIMES(3, ERROR) << "vertex " << v << " is not manifold. " << COUNTER;
-                ++count;
+                ++stats.num_remaining_non_manifold_vertices;
             }
         }
-        LOG_IF(count > 0, ERROR) << "mesh still have " << count << " non-manifold vertices";
+        LOG_IF(stats.num_remaining_non_manifold_vertices > 0, ERROR)
+                << "mesh still have " << stats.num_remaining_non_manifold_vertices << " non-manifold vertices";
 
         // ----------------------------------------------------------------------------------
 
         if (!log_issues)
-            return;
+            return stats;
 
         // Prepare a brief report on the construction of the mesh.
 
         std::string issues("");
-        if (num_faces_less_three_vertices_ > 0) {
-            issues += "\n   - " + std::to_string(num_faces_less_three_vertices_) +
-                      " faces with less than 3 vertices (ignored)";
-        }
+        if (include_builder_face_issues) {
+            if (num_faces_less_three_vertices_ > 0) {
+                issues += "\n   - " + std::to_string(num_faces_less_three_vertices_) +
+                          " faces with less than 3 vertices (ignored)";
+            }
 
-        if (num_faces_duplicate_vertices > 0) {
-            issues += "\n   - " + std::to_string(num_faces_duplicate_vertices) +
-                      " faces with duplicate vertices (ignored)";
-        }
+            if (num_faces_duplicate_vertices > 0) {
+                issues += "\n   - " + std::to_string(num_faces_duplicate_vertices) +
+                          " faces with duplicate vertices (ignored)";
+            }
 
-        if (num_faces_out_of_range_vertices_ > 0) {
-            issues += "\n   - " + std::to_string(num_faces_out_of_range_vertices_) +
-                      " faces with out-of-range vertices (ignored)";
-        }
+            if (num_faces_out_of_range_vertices_ > 0) {
+                issues += "\n   - " + std::to_string(num_faces_out_of_range_vertices_) +
+                          " faces with out-of-range vertices (ignored)";
+            }
 
-        if (num_faces_unknown_topology_ > 0) {
-            issues += "\n   - " + std::to_string(num_faces_unknown_topology_) +
-                      " complex faces with unknown topology (ignored)";
-        }
-
-        // ----------------------------------------------------------------------------------
-
-        if (num_non_manifold_vertices > 0) {
-            issues += "\n   - " + std::to_string(num_non_manifold_vertices) + " non-manifold vertices (fixed)";
-        }
-
-        if (num_non_manifold_edges > 0) {
-            issues += "\n   - " + std::to_string(num_non_manifold_edges) + " non-manifold edges (fixed)";
+            if (num_faces_unknown_topology_ > 0) {
+                issues += "\n   - " + std::to_string(num_faces_unknown_topology_) +
+                          " complex faces with unknown topology (ignored)";
+            }
         }
 
         // ----------------------------------------------------------------------------------
 
-        if (num_isolated_vertices > 0) {
-            issues += "\n   - " + std::to_string(num_isolated_vertices) + " isolated vertices (removed)";
+        if (stats.num_non_manifold_vertices > 0) {
+            issues += "\n   - " + std::to_string(stats.num_non_manifold_vertices) + " non-manifold vertices (fixed)";
+        }
+
+        if (stats.num_non_manifold_edges > 0) {
+            issues += "\n   - " + std::to_string(stats.num_non_manifold_edges) + " non-manifold edges (fixed)";
         }
 
         // ----------------------------------------------------------------------------------
 
-        if (num_copy_occurrences > 0 || num_isolated_vertices > 0) {
+        if (stats.num_isolated_vertices > 0) {
+            issues += "\n   - " + std::to_string(stats.num_isolated_vertices) + " isolated vertices (removed)";
+        }
+
+        // ----------------------------------------------------------------------------------
+
+        if (stats.num_vertex_copy_occurrences > 0 || stats.num_isolated_vertices > 0) {
             issues += "\n  Solution: ";
-            if (num_copy_occurrences > 0) {
-                issues += "\n   - " + std::to_string(num_non_manifold_vertices) + " vertices copied ("
-                          + std::to_string(num_copy_occurrences) + " occurrences)";
+            if (stats.num_vertex_copy_occurrences > 0) {
+                issues += "\n   - " + std::to_string(stats.num_non_manifold_vertices) + " vertices copied ("
+                          + std::to_string(stats.num_vertex_copy_occurrences) + " occurrences)";
 
-                if (!copied_vertices_for_linking_.empty()) {
+                if (include_builder_face_issues && !copied_vertices_for_linking_.empty()) {
                     std::size_t occurrences(0);
                     for (const auto &copies : copied_vertices_for_linking_) {
                         LOG_IF(copies.second.empty(), FATAL) << "vertex " << copies.first << " not actually copied";
@@ -214,14 +331,16 @@ namespace easy3d {
                     copied_vertices_for_linking_.clear();
                 }
             }
-            if (num_isolated_vertices > 0)
-                issues += "\n   - " + std::to_string(num_isolated_vertices) + " isolated vertices deleted";
+            if (stats.num_isolated_vertices > 0)
+                issues += "\n   - " + std::to_string(stats.num_isolated_vertices) + " isolated vertices deleted";
         }
 
         // ----------------------------------------------------------------------------------
 
         if (!issues.empty())
             LOG(WARNING) << "mesh has topological issues:" << issues;
+
+        return stats;
     }
 
 

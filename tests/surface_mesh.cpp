@@ -30,6 +30,9 @@
 #include <easy3d/util/resource.h>
 #include <easy3d/util/file_system.h>
 
+#include <cmath>
+#include <fstream>
+
 
 using namespace easy3d;
 
@@ -100,6 +103,79 @@ int test_surface_mesh() {
         std::cout << "#face:   " << mesh.n_faces() << std::endl;
         std::cout << "#vertex: " << mesh.n_vertices() << std::endl;
         std::cout << "#edge:   " << mesh.n_edges() << std::endl;
+    }
+
+
+    // PLY list length must not overflow for faces with more than 255 vertices.
+    {
+        SurfaceMesh large_polygon_mesh;
+        SurfaceMeshBuilder builder(&large_polygon_mesh);
+        builder.begin_surface();
+
+        std::vector<SurfaceMesh::Vertex> vertices;
+        const int num_vertices = 300;
+        vertices.reserve(num_vertices);
+        for (int i = 0; i < num_vertices; ++i) {
+            const float angle = static_cast<float>(2.0 * 3.14159265358979323846 * i / num_vertices);
+            vertices.push_back(builder.add_vertex(vec3(
+                    static_cast<float>(std::cos(angle)),
+                    static_cast<float>(std::sin(angle)),
+                    0.0f)));
+        }
+        builder.add_face(vertices);
+        builder.end_surface(false);
+
+        const std::string save_file_name = "./large-polygon.ply";
+        if (!SurfaceMeshIO::save(save_file_name, &large_polygon_mesh)) {
+            LOG(ERROR) << "failed to save large polygon mesh";
+            return EXIT_FAILURE;
+        }
+
+        bool found_uint_list_length = false;
+        std::ifstream input(save_file_name.c_str());
+        for (std::string line; std::getline(input, line); ) {
+            if (line == "property list uint int vertex_indices")
+                found_uint_list_length = true;
+            if (line == "end_header")
+                break;
+        }
+
+        if (file_system::delete_file(save_file_name))
+            std::cout << "the saved file has been deleted" << std::endl;
+        else
+            std::cerr << "failed to delete the saved file" << std::endl;
+
+        if (!found_uint_list_length) {
+            LOG(ERROR) << "large polygon PLY list length is not stored as uint";
+            return EXIT_FAILURE;
+        }
+    }
+
+
+    // Repair non-manifold topology on an already constructed mesh.
+    {
+        SurfaceMesh non_manifold_mesh;
+        SurfaceMesh::Vertex v0 = non_manifold_mesh.add_vertex(vec3(0, 0, 0));
+        SurfaceMesh::Vertex v1 = non_manifold_mesh.add_vertex(vec3(1, 0, 0));
+        SurfaceMesh::Vertex v2 = non_manifold_mesh.add_vertex(vec3(0, 1, 0));
+        SurfaceMesh::Vertex v3 = non_manifold_mesh.add_vertex(vec3(-1, 0, 0));
+        SurfaceMesh::Vertex v4 = non_manifold_mesh.add_vertex(vec3(0, -1, 0));
+
+        non_manifold_mesh.add_triangle(v0, v1, v2);
+        non_manifold_mesh.add_triangle(v0, v3, v4);
+
+        const auto stats = SurfaceMeshBuilder::repair_topology(&non_manifold_mesh, false);
+        if (stats.num_vertex_copy_occurrences != 1 || non_manifold_mesh.n_vertices() != 6) {
+            LOG(ERROR) << "surface mesh topology repair failed";
+            return EXIT_FAILURE;
+        }
+
+        for (auto v : non_manifold_mesh.vertices()) {
+            if (!non_manifold_mesh.is_manifold(v)) {
+                LOG(ERROR) << "surface mesh topology repair left a non-manifold vertex";
+                return EXIT_FAILURE;
+            }
+        }
     }
 
 
